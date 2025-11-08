@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ESP32 Wi-Fi Setup</title>
+    <style>
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        margin: 20px;
+        background-color: #f8f9fa;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        min-height: 100vh;
+      }
+      .container {
+        width: 500px;
+        background-color: #ffffff;
+        padding: 30px;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      h1 {
+        color: #007bff;
+        text-align: center;
+        margin-bottom: 20px;
+      }
+      form label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 500;
+      }
+      form input[type="text"],
+      form input[type="password"] {
+        width: calc(100% - 22px);
+        padding: 10px;
+        margin-bottom: 15px;
+        border: 1px solid #ced4da;
+        border-radius: 5px;
+        box-sizing: border-box;
+        transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+      }
+      form input[type="text"]:focus,
+      form input[type="password"]:focus {
+        border-color: #80bdff;
+        outline: 0;
+        box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+      }
+      .button-group {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 20px;
+        gap: 10px;
+        max-width: calc(100% - 4%);
+      }
+      .button-group button {
+        flex: 1;
+        padding: 10px 16px;
+        border-radius: 5px;
+        cursor: pointer;
+        border: 1px solid transparent;
+        font-size: 1rem;
+        transition: color 0.15s ease-in-out, background-color 0.15s ease-in-out,
+          border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+      }
+      .button-group button:first-child {
+        color: #212529;
+        background-color: #ffffff;
+        border-color: #ced4da;
+      }
+      .button-group button:last-child {
+        color: #fff;
+        background-color: #007bff;
+        border-color: #007bff;
+      }
+      .button-group button:hover { opacity: 0.8; }
+      .wifi-list {
+        margin-top: 20px;
+        border: 1px solid #ced4da;
+        border-radius: 5px;
+        padding: 10px;
+      }
+      .wifi-item {
+        display: flex;
+        align-items: center;
+        padding: 8px;
+        border-bottom: 1px solid #eee;
+      }
+      .wifi-item:last-child { border-bottom: none; }
+      .wifi-item input[type="radio"] { margin-right: 10px; }
+      .loading-message, .error-message { text-align: center; padding: 10px; }
+      .loading-message { color: #007bff; }
+      .error-message { color: #dc3545; }
+      .toast-container {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1000;
+      }
+      .toast {
+        background: rgba(0, 0, 0, 0.7);
+        color: #fff;
+        padding: 10px 20px;
+        margin-top: 10px;
+        border-radius: 5px;
+        opacity: 0;
+        animation: fadein 0.5s forwards, fadeout 0.5s 2.5s forwards;
+      }
+      @keyframes fadein { from {opacity: 0;} to {opacity: 1;} }
+      @keyframes fadeout { from {opacity: 1;} to {opacity: 0;} }
+      /* Saved list section */
+      .saved-section { margin-top: 24px; }
+      .saved-item {
+        display:flex; justify-content:space-between; align-items:center;
+        padding:8px; border:1px solid #ced4da; border-radius:6px; margin-bottom:8px;
+      }
+      .btn-danger {
+        background:#dc3545; color:#fff; border:1px solid #dc3545; padding:6px 10px; border-radius:4px; cursor:pointer;
+      }
+      .btn-danger:hover { opacity:.85; }
+      .muted { color:#6c757d; font-size:.9rem; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>ESP32 Wi-Fi Setup</h1>
+      <form method="POST" action="/save">
+        <label for="ssid">SSID:</label>
+        <input type="text" name="ssid" id="ssid" required />
+        <label for="password">Password:</label>
+        <input type="password" name="password" id="password" />
+        <div class="button-group">
+          <button type="submit">Save and Connect</button>
+          <button type="button" onclick="scanWiFi()">Scan Wi-Fi</button>
+        </div>
+      </form>
+
+      <div class="wifi-list" id="wifiList">
+        <p class="loading-message" id="loadingMessage">
+          Click "Scan Wi-Fi" to start scanning.
+        </p>
+      </div>
+
+      <!-- Saved Wi-Fi List -->
+      <div class="saved-section">
+        <h2>Saved Wi-Fi</h2>
+        <div id="savedList" class="wifi-list">
+          <p class="muted">Loading saved networks...</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script>
+      function showToast(message) {
+        const toastContainer = document.getElementById("toastContainer");
+        const toast = document.createElement("div");
+        toast.className = "toast";
+        toast.textContent = message;
+        toastContainer.appendChild(toast);
+        setTimeout(() => { toast.remove(); }, 3000);
+      }
+
+      function scanWiFi() {
+        showToast("Scanning for networks...");
+        const wifiList = document.getElementById("wifiList");
+        wifiList.innerHTML = "";
+        const loadingMessage = document.createElement("p");
+        loadingMessage.className = "loading-message";
+        loadingMessage.textContent = "Scanning for networks...";
+        wifiList.appendChild(loadingMessage);
+
+        fetch("/scan")
+          .then((r) => {
+            if (!r.ok) throw new Error(r.status);
+            return r.json();
+          })
+          .then((data) => {
+            loadingMessage.remove();
+            if (!data || data.length === 0) {
+              const p = document.createElement("p");
+              p.className = "error-message";
+              p.textContent = "No networks found. Try again.";
+              wifiList.appendChild(p);
+              showToast("No networks found.");
+              return;
+            }
+            showToast("Networks found!");
+            const heading = document.createElement("h2");
+            heading.textContent = "Available Networks";
+            wifiList.appendChild(heading);
+
+            const list = document.createElement("ul");
+            list.style.listStyleType = "none";
+            list.style.padding = "0";
+            list.style.margin = "0";
+
+            data.forEach((network) => {
+              const encryption = network.encryption ? "Encrypted" : "Open";
+              const item = document.createElement("li");
+              item.className = "wifi-item";
+              item.innerHTML = `
+                <input type="radio" name="ssid_radio" value="${network.ssid}" onclick="selectSSID('${network.ssid}')">
+                <span><strong>${network.ssid}</strong> (RSSI: ${network.rssi} dBm, ${encryption})</span>
+              `;
+              list.appendChild(item);
+            });
+            wifiList.appendChild(list);
+          })
+          .catch(() => {
+            loadingMessage.remove();
+            const errorMessage = document.createElement("p");
+            errorMessage.className = "error-message";
+            errorMessage.textContent = "Error scanning networks. Please try again.";
+            wifiList.appendChild(errorMessage);
+            showToast("Scan failed.");
+          });
+      }
+
+      function selectSSID(ssid) {
+        document.getElementById("ssid").value = ssid;
+      }
+
+      function loadSavedList() {
+        const savedList = document.getElementById("savedList");
+        savedList.innerHTML = '<p class="muted">Loading saved networks...</p>';
+
+        fetch("/list")
+          .then((r) => r.json())
+          .then((data) => {
+            savedList.innerHTML = "";
+            if (!data || data.length === 0) {
+              const p = document.createElement("p");
+              p.className = "muted";
+              p.textContent = "No saved Wi-Fi.";
+              savedList.appendChild(p);
+              return;
+            }
+            const ul = document.createElement("ul");
+            ul.style.listStyleType = "none";
+            ul.style.padding = "0";
+            ul.style.margin = "0";
+            data.forEach((item) => {
+              const li = document.createElement("li");
+              li.className = "saved-item";
+              li.innerHTML = `
+                <span><strong>${item.ssid}</strong></span>
+                <button class="btn-danger" onclick="deleteSaved('${item.ssid}')">Delete</button>
+              `;
+              ul.appendChild(li);
+            });
+            savedList.appendChild(ul);
+          })
+          .catch(() => {
+            savedList.innerHTML = '<p class="error-message">Failed to load saved list.</p>';
+          });
+      }
+
+      function deleteSaved(ssid) {
+        if (!confirm('Delete "' + ssid + '"?')) return;
+        fetch("/delete?ssid=" + encodeURIComponent(ssid))
+          .then(() => {
+            showToast("Deleted: " + ssid);
+            loadSavedList();
+          })
+          .catch(() => showToast("Delete failed"));
+      }
+
+      // Load saved list initially
+      loadSavedList();
+    </script>
+  </body>
+</html>

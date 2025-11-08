@@ -1,0 +1,61 @@
+# Arduino / C/C++ common ignores
+*.o
+*.a
+*.so
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.tmp
+*.log
+
+# Build / output folders
+/.pio/
+/build/
+/out/
+/dist/
+/bin/
+
+# IDEs and OS files
+/.vscode/
+/.idea/
+/*.code-workspace
+/.DS_Store
+Thumbs.db
+
+# PlatformIO / env
+.platformio
+.env
+
+# CMake / Make
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Node
+node_modules/
+
+# Ensure these project folders are tracked (do not ignore)
+!/src/
+!/src/**
+
+!/utilis/
+!/utilis/**
+
+!/utils/
+!/utils/**
+
+!/examples/
+!/examples/**
+
+!/example/
+!/example/**
+
+# Keep repo metadata and docs
+!README*
+!LICENSE
+!library.properties
+!keywords.txt
