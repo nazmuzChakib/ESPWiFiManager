@@ -7,4 +7,8 @@
         4. No extra dependency (use default esp32 library(s)
 
 ### *Usages:*
-        1. 
+        1. Include this library into your project source code 
+<code>#include <ESPWiFiManager.h></code>
+        2. Setting up server with port
+        
+
