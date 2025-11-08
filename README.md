@@ -8,7 +8,8 @@
 
 ### *Usages:*
         1. Include this library into your project source code 
-<code>#include <ESPWiFiManager.h></code>
         2. Setting up server with port
         
 
+### *License:*
+        This project is released under MIT Open source software license. For more please visit & read license file.
