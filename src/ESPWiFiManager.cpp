@@ -356,7 +356,6 @@ void WiFiManager::handleSerialCommands(Stream& io) {
     io.println("  CLEAR");
     io.println("  CONNECT \"SSID with spaces\" [\"password with spaces\"]");
     io.println("  JSON - get credentials in JSON format");
-    io.println("  REBOOT - reboot the device");
   } else if (cmd == "connect" || cmd == "CONNECT") {
     if (n >= 2) {
       String ssid = p[1];
@@ -374,10 +373,6 @@ void WiFiManager::handleSerialCommands(Stream& io) {
     }
   } else if (cmd == "JSON") {
     io.println(getCredentialsJson());
-  } else if (cmd == "REBOOT" || cmd == "reboot") {
-    io.println("[WiFiManager] Rebooting...");
-    delay(1000);
-    ESP.restart();
   } else if (cmd == "STATUS" || cmd == "status") {
     io.printf("AP SSID: %s\n", _ap_ssid);
     io.printf("AP Password: %s\n", _ap_password);
@@ -389,9 +384,26 @@ void WiFiManager::handleSerialCommands(Stream& io) {
   }
 }
 
+void WiFiManager::_printHelp() {
+  Serial.println("[WiFiManager] === Serial Commands ===");
+  Serial.println("[WiFiManager] ADD \"SSID with spaces\" \"password with spaces\"");
+  Serial.println("[WiFiManager] DEL \"SSID with spaces\"");
+  Serial.println("[WiFiManager] LIST");
+  Serial.println("[WiFiManager] CLEAR");
+  Serial.println("[WiFiManager] CONNECT \"SSID with spaces\" [\"password with spaces\"]");
+  Serial.println("[WiFiManager] JSON - get credentials in JSON format");
+  Serial.println("[WiFiManager] STATUS");
+  Serial.println("[WiFiManager] HELP");
+  Serial.println("[WiFiManager] -----------------------------------");
+}
+
 void WiFiManager::process() {
   _dnsServer.processNextRequest();
   if (_server) {
     _server->handleClient(); // Handle web requests
   }
+}
+
+void WiFiManager::begin() {
+  _printHelp();
 }

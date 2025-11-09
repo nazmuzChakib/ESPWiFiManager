@@ -77,17 +77,6 @@ void handleRoot() {
   server.send_P(200, "text/html", homepage);
 }
 
-void printHelp() {
-  Serial.println("=== WiFiManager Serial Commands ===");
-  Serial.println("ADD \"SSID with spaces\" \"password with spaces\"");
-  Serial.println("DEL \"SSID with spaces\"");
-  Serial.println("LIST");
-  Serial.println("CLEAR");
-  Serial.println("HELP");
-  Serial.println("REBOOT");
-  Serial.println("-----------------------------------");
-}
-
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -112,13 +101,10 @@ void setup() {
     // wifiManager.startAPMode(server); // will serve UI on STA IP as well
   }
 
-  printHelp();
+  wifiManager.begin();
 }
 
 void loop() {
   wifiManager.process();
   wifiManager.handleSerialCommands(Serial);
-  // if (WiFi.status() == WL_CONNECTED) {
-  //   server.handleClient(); // Handle web requests
-  // }
 }

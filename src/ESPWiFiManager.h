@@ -14,6 +14,9 @@ public:
   // Constructor (AP SSID/Password). No static IP involved.
   WiFiManager(const char* ap_ssid, const char* ap_password);
 
+  // initialize serial for debug (optional)
+  void begin(); 
+
   // Try connecting with saved (multiple) credentials; returns true if connected.
   bool connectToWiFi();
 
@@ -64,6 +67,8 @@ private:
   void _handleSave();
   void _handleList();     // list saved SSIDs (no passwords)
   void _handleDelete();   // delete by ssid
+
+  void _printHelp();
 
   // the server reference (only valid after startAPMode)
   WebServer* _server = nullptr;
