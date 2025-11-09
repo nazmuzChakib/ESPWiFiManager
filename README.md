@@ -71,28 +71,54 @@ Quick start (example sketch)
 This is a minimal usage pattern. Check the header file for the exact class and method names if you need to match the API in your checked-out version.
 
 ```cpp
-#include <WiFi.h>
-#include "ESPWiFiManager.h" // adjust include path according to how you installed the library
+#include <WiFi.h>           // ESP32 WiFi support (station + softAP)
+#include <WebServer.h>      // Simple web server for handling HTTP requests
+#include <ESPWiFiManager.h> // Library that manages WiFi connection + captive portal
 
-ESPWiFiManager wifiManager;
+// Create a WebServer instance that listens on port 80
+WebServer server(80);
+
+// Create WiFiManager object:
+// - First parameter is the Access Point (AP) SSID to be used when starting the setup portal
+// - Second parameter is the AP password (AP-only; used when the library starts the portal)
+WiFiManager wifiManager("ESP32_Setup", "12345678");
 
 void setup() {
+  // Initialize serial port for debug messages
   Serial.begin(115200);
-  // Initialize the manager (may optionally take parameters: AP name, AP password, timeout...).
-  wifiManager.begin();
+  delay(200); // short delay to allow Serial to initialize
 
-  // Start Wi-Fi: if saved credentials are available the library will connect;
-  // otherwise it will start the config portal (AP mode + captive web portal).
-  if (wifiManager.autoConnect("ESP32-SetupAP")) {
-    Serial.println("Connected to Wi‑Fi!");
+  // Try to connect to WiFi using previously saved credentials (STA mode).
+  // connectToWiFi() returns true if connection succeeded, false otherwise.
+  if (!wifiManager.connectToWiFi()) {
+    // No saved creds or connection failed: start AP portal for user to configure WiFi
+    Serial.println("Starting AP portal...");
+    // This starts a softAP and serves the configuration web UI using the provided server
+    wifiManager.startAPMode(server);
   } else {
-    Serial.println("Failed to connect or portal closed.");
+    // Connected in STA mode
+    Serial.print("Connected. IP: ");
+    // Set the WebServer to be used when in STA mode so the same UI can be served
+    wifiManager.setServer(&server);
+    // Print the assigned IP address for the station interface
+    Serial.println(WiFi.localIP());
+    // Note: you can also start the AP portal while connected if you want to serve the UI on the STA IP:
+    // wifiManager.startAPMode(server);
   }
+
+  // Initialize WiFiManager internals and enable debug output on Serial.
+  // Call this after you've set up the server/connection state.
+  wifiManager.begin();
 }
 
 void loop() {
-  // you may want to call a handle() method if the library requires it to serve web requests
-  // wifiManager.handle();
+  // Regularly call process() to let WiFiManager handle DNS redirection (captive portal),
+  // serve web pages, and handle WiFi portal requests.
+  wifiManager.process();
+
+  // Allow interacting with the WiFiManager via Serial commands (if supported by the library).
+  // This can let you trigger actions (like resetting saved credentials) over Serial.
+  wifiManager.handleSerialCommands(Serial);
 }
 ```
 
