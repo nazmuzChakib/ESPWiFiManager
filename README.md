@@ -210,8 +210,3 @@ License
 This project is released under the MIT License. See the LICENSE file in the repository for details.
 
 ---
-
-If you want, I can:
-- Add or update an example sketch with a tested minimal usage for Arduino or PlatformIO.
-- Regenerate page_index.h from a modified index.html if you provide changes to the portal UI.
-- Extract exact public API signatures from src/ESPWiFiManager.h and include a precise programmable reference section in this README.
