@@ -26,7 +26,7 @@ String WiFiManager::getCredentialsJson() const {
 // -------------------- Manage credentials --------------------
 void WiFiManager::addCredential(const char* ssid, const char* password) {
   String json = _loadCredentialsJson();
-  DynamicJsonDocument doc(4096);
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, json);
   JsonArray arr;
   if (err) {
@@ -58,7 +58,7 @@ void WiFiManager::addCredential(const char* ssid, const char* password) {
 
 void WiFiManager::deleteCredential(const char* ssid) {
   String json = _loadCredentialsJson();
-  DynamicJsonDocument doc(4096);
+  JsonDocument doc;
   if (deserializeJson(doc, json)) {
     Serial.println("[WiFiManager] No credentials to delete.");
     return;
@@ -92,7 +92,7 @@ void WiFiManager::clearCredentials() {
 
 void WiFiManager::listCredentialsToSerial() const {
   String json = _loadCredentialsJson();
-  DynamicJsonDocument doc(4096);
+  JsonDocument doc;
   if (deserializeJson(doc, json)) {
     Serial.println("[WiFiManager] []");
     return;
@@ -105,9 +105,32 @@ void WiFiManager::listCredentialsToSerial() const {
 }
 
 // -------------------- Connect (multiple) --------------------
+bool WiFiManager::validateWiFiCredentials(const char* ssid, const char* password) {
+  WiFi.begin(ssid, password);
+  unsigned long startAttemptTime = millis();
+  unsigned long lastPrintTime = 0;
+
+  // Non-Blocking loop: 
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 8000) {
+    process(); // refresh DNS and web server handling in the background
+    
+    // print dots every 400ms to indicate progress (optional)
+    if (millis() - lastPrintTime > 400) {
+      Serial.print(".");
+      lastPrintTime = millis();
+    }
+    delay(10); // Watchdog Timer (WDT) a little delay to prevent WDT reset during this blocking operation
+  }
+  Serial.println();
+  
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  WiFi.disconnect(true, true);
+  return ok;
+}
+
 bool WiFiManager::connectToWiFi() {
   String json = _loadCredentialsJson();
-  DynamicJsonDocument doc(4096);
+  JsonDocument doc; // ArduinoJson v7
   if (deserializeJson(doc, json)) {
     Serial.println("[WiFiManager] No saved credentials.");
     return false;
@@ -123,12 +146,20 @@ bool WiFiManager::connectToWiFi() {
 
     WiFi.begin(ssid.c_str(), pass.c_str());
     unsigned long startAttemptTime = millis();
+    unsigned long lastPrintTime = 0;
 
+    // Non-Blocking লুপ
     while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 12000) {
-      delay(500);
-      Serial.print(".");
+      process(); // refresh DNS and web server handling in the background
+      
+      if (millis() - lastPrintTime > 500) {
+        Serial.print(".");
+        lastPrintTime = millis();
+      }
+      delay(10);
     }
     Serial.println();
+    
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("[WiFiManager] Connected!");
       Serial.print("IP: ");
@@ -140,19 +171,6 @@ bool WiFiManager::connectToWiFi() {
   }
   Serial.println("[WiFiManager] Could not connect to any saved network.");
   return false;
-}
-
-bool WiFiManager::validateWiFiCredentials(const char* ssid, const char* password) {
-  WiFi.begin(ssid, password);
-  unsigned long startAttemptTime = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 8000) {
-    delay(400);
-    Serial.print(".");
-  }
-  Serial.println();
-  bool ok = (WiFi.status() == WL_CONNECTED);
-  WiFi.disconnect(true, true);
-  return ok;
 }
 
 // -------------------- URL decode --------------------
@@ -180,24 +198,39 @@ void WiFiManager::_handleRoot() {
 }
 
 void WiFiManager::_handleScan() {
-  WiFi.scanDelete();
-  int n = WiFi.scanNetworks(false, true); // async=false, show_hidden=true
-  if (n <= 0) {
+  WiFi.scanDelete();                       // clear previous scans to free memory
+
+  Serial.println("[WiFiManager] Scan started in background...");
+
+  // Async scan; results will be rady in a future loop() iteration when _handleScan is called again
+  int n = WiFi.scanNetworks(true, true);   // async=true, show_hidden=true
+  while (n == WIFI_SCAN_RUNNING) {
+    process();                             // keep DNS and web server responsive while waiting for scan
+    delay(50);                             // Watchdog Timer (WDT) a little delay to prevent WDT reset during this blocking operation
+    n = WiFi.scanComplete();               // recheck if scan is done
+  }
+
+  // if no networks found or error, return empty array
+  if (n == WIFI_SCAN_FAILED || n <= 0) {
     _server->send(200, "application/json", "[]");
-    Serial.println("[WiFiManager] No networks found.");
+    Serial.println("[WiFiManager] WiFi scan failed or no networks found.");
     return;
   }
-  String json = "[";
+
+  // Update to ArduinoJson 7 for better memory efficiency (no double parsing)
+  JsonDocument doc;
   for (int i = 0; i < n; ++i) {
-    if (i) json += ",";
-    json += "{";
-    json += "\"ssid\":\"" + WiFi.SSID(i) + "\",";
-    json += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
-    json += "\"encryption\":" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-    json += "}";
+    JsonObject obj = doc.add<JsonObject>();
+    obj["ssid"] = WiFi.SSID(i);
+    obj["rssi"] = WiFi.RSSI(i);
+    obj["encryption"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
   }
-  json += "]";
+  String json;
+  serializeJson(doc, json);
   _server->send(200, "application/json", json);
+
+  WiFi.scanDelete();                       // free memory from scan results
+  Serial.printf("[WiFiManager] Scan complete and send to client: %s\n", json.c_str());
 }
 
 void WiFiManager::_handleSave() {
@@ -224,11 +257,11 @@ void WiFiManager::_handleSave() {
 
 void WiFiManager::_handleList() {
   // Return only SSIDs, not passwords
-  DynamicJsonDocument out(2048);
+  JsonDocument out;
   JsonArray arrOut = out.to<JsonArray>();
 
   String json = _loadCredentialsJson();
-  DynamicJsonDocument doc(4096);
+  JsonDocument doc;
   if (!deserializeJson(doc, json)) {
     for (JsonObject obj : doc.as<JsonArray>()) {
       JsonObject o = arrOut.createNestedObject();
