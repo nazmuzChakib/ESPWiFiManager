@@ -1,61 +1,63 @@
 /**
  * @file BasicUsage.ino
- * @author Cypher-Z (cypherz@gmail.com)
- * @brief This example demonstrates the basic usage of the ESPWiFiManager library
- *        for managing WiFi connections on an ESP32 device.
- * @version 1.0
- * @date 2025-11-09
- * 
- * @copyright Copyright Cypher-Z (c) 2025
- * 
+ * @brief Non-blocking ESPWiFiManager example for ESP32 & ESP8266
  */
 
-#include <WiFi.h>           // ESP32 WiFi support (station + softAP)
-#include <WebServer.h>      // Simple web server for handling HTTP requests
-#include <ESPWiFiManager.h> // Library that manages WiFi connection + captive portal
+#if defined(ESP32)
+  #include <WiFi.h>
+  #include <WebServer.h>
+  WebServer server(80);
+#elif defined(ESP8266)
+  #include <ESP8266WiFi.h>
+  #include <ESP8266WebServer.h>
+  ESP8266WebServer server(80);
+#endif
 
-// Create a WebServer instance that listens on port 80
-WebServer server(80);
+#include <ESPWiFiManager.h>
 
-// Create WiFiManager object:
-// - First parameter is the Access Point (AP) SSID to be used when starting the setup portal
-// - Second parameter is the AP password (AP-only; used when the library starts the portal)
-WiFiManager wifiManager("ESP32_Setup", "12345678");
+// Initialize library
+WiFiManager wifiManager("ESP_Setup_Portal", "12345678");
+
+// We use a simple flag to track when we switch to AP mode or successful connection
+bool apModeStarted = false;
+bool connectionHandled = false;
 
 void setup() {
-  // Initialize serial port for debug messages
   Serial.begin(115200);
-  delay(200); // short delay to allow Serial to initialize
+  delay(1000); // Give serial time to stabilize
 
-  // Try to connect to WiFi using previously saved credentials (STA mode).
-  // connectToWiFi() returns true if connection succeeded, false otherwise.
-  if (!wifiManager.connectToWiFi()) {
-    // No saved creds or connection failed: start AP portal for user to configure WiFi
-    Serial.println("Starting AP portal...");
-    // This starts a softAP and serves the configuration web UI using the provided server
-    wifiManager.startAPMode(server);
-  } else {
-    // Connected in STA mode
-    Serial.print("Connected. IP: ");
-    // Set the WebServer to be used when in STA mode so the same UI can be served
-    wifiManager.setServer(&server);
-    // Print the assigned IP address for the station interface
-    Serial.println(WiFi.localIP());
-    // Note: you can also start the AP portal while connected if you want to serve the UI on the STA IP:
-    // wifiManager.startAPMode(server);
-  }
-
-  // Initialize WiFiManager internals and enable debug output on Serial.
-  // Call this after you've set up the server/connection state.
   wifiManager.begin();
+  
+  Serial.println("\n[Main] Initiating Non-blocking WiFi Connection...");
+  // Start the connection process (Non-Blocking!)
+  wifiManager.connectToWiFi();
 }
 
 void loop() {
-  // Regularly call process() to let WiFiManager handle DNS redirection (captive portal),
-  // serve web pages, and handle WiFi portal requests.
+  // 1. Process WiFi Manager (Handles connection timeouts, web server, and DNS)
   wifiManager.process();
 
-  // Allow interacting with the WiFiManager via Serial commands (if supported by the library).
-  // This can let you trigger actions (like resetting saved credentials) over Serial.
+  // 2. Handle Serial Interactions
   wifiManager.handleSerialCommands(Serial);
+
+  // 3. Application Logic based on State Machine
+  WiFiState currentState = wifiManager.getState();
+
+  if (currentState == WIFI_STATE_CONNECTED && !connectionHandled) {
+    Serial.println("[Main] Wi-Fi is Connected! Starting Web Server for general UI...");
+    wifiManager.setServer(&server);
+    server.begin(); 
+    connectionHandled = true;
+    
+    // You can start doing other smart home tasks here!
+  } 
+  else if (currentState == WIFI_STATE_FAILED && !apModeStarted) {
+    Serial.println("[Main] All connections failed. Falling back to AP Mode.");
+    wifiManager.startAPMode(server);
+    apModeStarted = true;
+  }
+
+  // ---- Other Non-Blocking Logic Can Go Here ----
+  // Since we removed while(), this code will execute smoothly!
+  // Example: blink an LED, read sensors, etc.
 }

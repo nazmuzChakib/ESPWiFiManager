@@ -1,77 +1,109 @@
 #ifndef ESP_WIFI_MANAGER_H
 #define ESP_WIFI_MANAGER_H
 
-#include <WiFi.h>
-#include <WebServer.h>
-#include <Preferences.h>
+#include <Arduino.h>
 #include <ArduinoJson.h>
 #include <DNSServer.h>
 
-extern const char wifiSetupPage[]; // from wifi_manager_web.h (PROGMEM HTML)
+// ---------------- Cross-Platform Support ----------------
+#if defined(ESP32)
+  #include <WiFi.h>
+  #include <WebServer.h>
+  #include <Preferences.h>
+  typedef WebServer ESP_WebServer;
+#elif defined(ESP8266)
+  #include <ESP8266WiFi.h>
+  #include <ESP8266WebServer.h>
+  #include <EEPROM.h>
+  typedef ESP8266WebServer ESP_WebServer;
+#else
+  #error "This library only supports ESP32 and ESP8266"
+#endif
+
+extern const unsigned char page_index[]; // From page_index.h
+extern unsigned int page_index_len;
+
+// ---------------- State Machine Enum ----------------
+enum WiFiState {
+  WIFI_STATE_IDLE,
+  WIFI_STATE_CONNECTING,
+  WIFI_STATE_CONNECTED,
+  WIFI_STATE_AP_MODE,
+  WIFI_STATE_FAILED
+};
 
 class WiFiManager {
 public:
-  // Constructor (AP SSID/Password). No static IP involved.
   WiFiManager(const char* ap_ssid, const char* ap_password);
 
-  // initialize serial for debug (optional)
-  void begin(); 
+  void begin();
+  
+  // Non-blocking connect initiation
+  void connectToWiFi(); 
+  
+  // Call this frequently in your main loop()
+  void process();
 
-  // Try connecting with saved (multiple) credentials; returns true if connected.
-  bool connectToWiFi();
+  void startAPMode(ESP_WebServer& server);
+  void setServer(ESP_WebServer* server);
 
-  // Optional quick validator (used by /save flow)
-  bool validateWiFiCredentials(const char* ssid, const char* password);
+  // Get current state of the WiFi manager
+  WiFiState getState() const;
 
-  // Start AP + Web UI/REST endpoints (uses provided WebServer instance)
-  void startAPMode(WebServer& server);
-
-  // ---- Managing credentials ----
-  void addCredential(const char* ssid, const char* password); // add or update
+  // Credential Management
+  void addCredential(const char* ssid, const char* password);
   void deleteCredential(const char* ssid);
-  void clearCredentials();                                     // public as requested
-  void listCredentialsToSerial() const;                        // pretty print to Serial
-  String getCredentialsJson() const;                           // returns full JSON array [{"ssid":"...","password":"..."}]
-  void setServer(WebServer* server);                           // set server if not using startAPMode
-  void process();                                              // call this in loop() to handle DNS and web requests
+  void clearCredentials();
+  void listCredentialsToSerial() const;
+  String getCredentialsJson() const;
 
-  // ---- Serial commands handler (quotes-aware) ----
   void handleSerialCommands(Stream& io = Serial);
 
 private:
-  // AP config
   const char* _ap_ssid;
   const char* _ap_password;
+  
+  ESP_WebServer* _server = nullptr;
+  DNSServer _dnsServer;
 
-  // add dns 
-  DNSServer _dnsServer; // dns for captive portal
+  // State Tracking
+  WiFiState _currentState = WIFI_STATE_IDLE;
+  unsigned long _startAttemptTime = 0;
+  const unsigned long _connectionTimeout = 12000; // 12 seconds per network
+  
+  // Credential iteration for connection
+  int _currentNetworkIndex = 0;
+  bool _isConnecting = false;
 
-  // Storage
-  mutable Preferences _prefs; // mutable to allow const getters to open NVS
+  // Platform specific storage details
+#if defined(ESP32)
+  mutable Preferences _prefs;
   static constexpr const char* NVS_NAMESPACE = "wifi-config";
   static constexpr const char* NVS_KEY_MULTI = "multi";
+#elif defined(ESP8266)
+  static constexpr int EEPROM_SIZE = 1024;
+#endif
 
-  // Helpers for JSON storage
-  String _loadCredentialsJson() const;           // returns JSON array (string)
-  void   _saveCredentialsJson(const String& js); // stores JSON array
+  // Storage Helpers
+  String _loadData() const;
+  void _saveData(const String& data);
 
-  // URL decode (for /save form handling safety)
+  // Core Connection Logic
+  void _startNextConnection();
+  void _checkConnectionStatus();
+
+  // Utilities
   static String _urlDecode(const String& str);
-
-  // Tokenizer for serial commands supporting "quoted strings"
   static int _splitArgsQuoted(const String& line, String outParts[], int maxParts);
 
-  // Web handlers (bound with std::bind)
+  // Web Handlers
   void _handleRoot();
   void _handleScan();
   void _handleSave();
-  void _handleList();     // list saved SSIDs (no passwords)
-  void _handleDelete();   // delete by ssid
+  void _handleList();
+  void _handleDelete();
 
   void _printHelp();
-
-  // the server reference (only valid after startAPMode)
-  WebServer* _server = nullptr;
 };
 
 #endif // ESP_WIFI_MANAGER_H
