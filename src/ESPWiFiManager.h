@@ -128,7 +128,7 @@ public:
    * 
    * @param io Stream object to read from and write to (default is Serial).
    */
-  void handleSerialCommands(Stream& io = Serial);
+  void executeCommands(String cmdLine, Stream& io = Serial);
 
 private:
   const char* _ap_ssid;

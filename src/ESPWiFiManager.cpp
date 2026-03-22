@@ -422,22 +422,18 @@ int WiFiManager::_splitArgsQuoted(const String& line, String outParts[], int max
   return count;
 }
 
-void WiFiManager::handleSerialCommands(Stream& io) {
-  // Parse incoming commands from the serial monitor
-  if (!io.available()) return;
-  String line = io.readStringUntil('\n');
-  line.trim();
-  if (!line.length()) return;
+void WiFiManager::executeCommand(String cmdLine, Stream& io) {
+  cmdLine.trim();
+  if (!cmdLine.length()) return;
 
   const int MAXP = 4;
   String p[MAXP];
-  int n = _splitArgsQuoted(line, p, MAXP);
+  int n = _splitArgsQuoted(cmdLine, p, MAXP);
   if (n == 0) return;
 
   String cmd = p[0];
   cmd.toUpperCase();
 
-  // Execute matching command action
   if (cmd == "ADD" && n >= 2) {
     addCredential(p[1].c_str(), (n >= 3) ? p[2].c_str() : "");
   } else if ((cmd == "DEL" || cmd == "DELETE") && n >= 2) {
@@ -453,6 +449,38 @@ void WiFiManager::handleSerialCommands(Stream& io) {
     _printHelp();
   }
 }
+
+// void WiFiManager::handleSerialCommands(Stream& io) {
+//   // Parse incoming commands from the serial monitor
+//   if (!io.available()) return;
+//   String line = io.readStringUntil('\n');
+//   line.trim();
+//   if (!line.length()) return;
+
+//   const int MAXP = 4;
+//   String p[MAXP];
+//   int n = _splitArgsQuoted(line, p, MAXP);
+//   if (n == 0) return;
+
+//   String cmd = p[0];
+//   cmd.toUpperCase();
+
+//   // Execute matching command action
+//   if (cmd == "ADD" && n >= 2) {
+//     addCredential(p[1].c_str(), (n >= 3) ? p[2].c_str() : "");
+//   } else if ((cmd == "DEL" || cmd == "DELETE") && n >= 2) {
+//     deleteCredential(p[1].c_str());
+//   } else if (cmd == "CLEAR") {
+//     clearCredentials();
+//   } else if (cmd == "LIST") {
+//     listCredentialsToSerial();
+//   } else if (cmd == "STATUS") {
+//     io.printf("State: %d\n", _currentState);
+//     if(_currentState == WIFI_STATE_CONNECTED) io.printf("IP: %s\n", WiFi.localIP().toString().c_str());
+//   } else {
+//     _printHelp();
+//   }
+// }
 
 void WiFiManager::_printHelp() {
   Serial.println("[WiFiManager] Commands: ADD \"SSID\" \"PASS\", DEL \"SSID\", LIST, CLEAR, STATUS");

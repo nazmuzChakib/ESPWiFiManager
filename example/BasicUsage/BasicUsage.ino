@@ -72,7 +72,18 @@ void loop() {
   wifiManager.process();
 
   // Handle incoming commands dynamically over the Serial Monitor
-  wifiManager.handleSerialCommands(Serial);
+  if (Serial.available()) {
+    String serialData = Serial.readStringUntil('\n');
+    serialData.trim();
+    
+    // if command start with "WIFI"
+    if (serialData.startsWith("WIFI")) {
+      String wifiCmd = serialData.substring(5); 
+      wifiManager.executeCommand(wifiCmd, Serial);
+    } else {
+      Serial.println("[Main] Unknown command: " + serialData);
+    }
+  }
 
   // 2. Application Logic based on the internal State Machine of WiFiManager
   WiFiState currentState = wifiManager.getState();
