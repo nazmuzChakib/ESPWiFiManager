@@ -6,9 +6,9 @@ Usage:
     python3 html_to_header.py index.html
 
 Output:
-    Saves the generated header into the subfolder 'pages'
+    Saves the generated header into the 'src' folder
     relative to where this script file lives. (e.g. if this script is
-    in .../webserver/utils, output goes to .../webserver/utils/pages)
+    in .../ESPWiFiManager/utils, output goes to .../ESPWiFiManager/src)
 """
 
 import sys
@@ -38,12 +38,12 @@ def html_to_header(filepath: str):
     safe_base = make_c_identifier(base)
     guard = f"PAGE_{safe_base.upper()}_H"
 
-    # Determine script directory and target pages directory (pages subfolder)
+    # Determine script directory and target src directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    pages_dir = os.path.normpath(os.path.join(script_dir, "pages"))
-    os.makedirs(pages_dir, exist_ok=True)
+    src_dir = os.path.normpath(os.path.join(script_dir, "..", "src"))
+    os.makedirs(src_dir, exist_ok=True)
 
-    output_filename = os.path.join(pages_dir, f"page_{base}.h")
+    output_filename = os.path.join(src_dir, f"page_{base}.h")
 
     # Read original file and gzip-compress into memory
     with open(filepath, "rb") as f_in:
@@ -53,7 +53,7 @@ def html_to_header(filepath: str):
     # current timestamp
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Create header file in pages directory
+    # Create header file in src directory
     with open(output_filename, "w", newline="\n") as out:
         out.write(f"#ifndef {guard}\n")
         out.write(f"#define {guard}\n\n")
@@ -61,7 +61,7 @@ def html_to_header(filepath: str):
         out.write(f"// Gzip generated on: {timestamp}\n\n")
 
         # Write array in xxd -i style (uppercase hex, 16 bytes per line)
-        out.write(f"unsigned char page_{safe_base}[] = {{\n")
+        out.write(f"const unsigned char page_{safe_base}[] = {{\n")
         for i, b in enumerate(compressed):
             if i % 16 == 0:
                 out.write("  ")
