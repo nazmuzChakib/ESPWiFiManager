@@ -140,7 +140,9 @@ private:
   // State Tracking
   WiFiState _currentState = WIFI_STATE_IDLE;
   unsigned long _startAttemptTime = 0;
+  unsigned long _scanStartTime = 0;
   const unsigned long _connectionTimeout = 12000; // 12 seconds max per network
+  const unsigned long _scanTimeout = 15000;        // 15 seconds max for scan to complete
   
   // Smart Connect Variables
   std::vector<String> _matchedSSIDs;

@@ -77,7 +77,7 @@ void loop() {
     serialData.trim();
     
     // if command start with "WIFI"
-    if (serialData.startsWith("WIFI")) {
+    if (serialData.startsWith("WIFI ")) {
       String wifiCmd = serialData.substring(5); 
       wifiManager.executeCommand(wifiCmd, Serial);
     } else {

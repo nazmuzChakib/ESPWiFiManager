@@ -133,14 +133,23 @@ void WiFiManager::listCredentialsToSerial() const {
 void WiFiManager::connectToWiFi() {
   Serial.println("[WiFiManager] Scanning air to find known networks...");
   // Start an async/non-blocking scan of nearby networks
-  WiFi.scanNetworks(true, true); 
+  WiFi.scanNetworks(true, true);
+  _scanStartTime = millis(); // Track when scan began for timeout detection
   _currentState = WIFI_STATE_SCANNING;
 }
 
 void WiFiManager::_checkScanStatus() {
   int n = WiFi.scanComplete();
-  // Wait until scan is completed
-  if (n == WIFI_SCAN_RUNNING) return; 
+
+  // Wait until scan is done — but abort if it takes too long
+  if (n == WIFI_SCAN_RUNNING) {
+    if (millis() - _scanStartTime >= _scanTimeout) {
+      Serial.println("[WiFiManager] Scan timed out! Falling back to AP mode.");
+      WiFi.scanDelete();
+      _currentState = WIFI_STATE_FAILED;
+    }
+    return;
+  }
 
   _matchedSSIDs.clear();
   _matchedPasses.clear();
