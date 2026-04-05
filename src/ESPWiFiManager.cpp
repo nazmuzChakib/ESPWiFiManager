@@ -132,6 +132,12 @@ void WiFiManager::listCredentialsToSerial() const {
 // -------------------- Smart Connection Logic --------------------
 void WiFiManager::connectToWiFi() {
   Serial.println("[WiFiManager] Scanning air to find known networks...");
+
+  // ---> setup STA mode before scanning
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(50);
+
   // Start an async/non-blocking scan of nearby networks
   WiFi.scanNetworks(true, true);
   _scanStartTime = millis(); // Track when scan began for timeout detection
