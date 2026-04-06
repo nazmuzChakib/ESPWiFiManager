@@ -1,195 +1,181 @@
-# ESPWiFiManager
+# ESPWiFiManager 🚀
 
-ESPWiFiManager is a small, smart, and easy-to-use library for ESP32 & ESP8266 that provides a web-based captive portal and simple serial commands to configure Wi‑Fi credentials at runtime. It is designed to be lightweight, with no additional dependencies beyond the default Arduino core libraries.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Version](https://img.shields.io/badge/version-3.0.37-blue.svg)](https://github.com/nazmuzchakib/ESPWiFiManager)
+[![Platform](https://img.shields.io/badge/platform-ESP32%20%7C%20ESP8266-green.svg)](https://github.com/nazmuzchakib/ESPWiFiManager)
 
-This README documents the goals, installation, usage patterns, captive portal features, utilities included with the repository, and troubleshooting tips.
-
----
-
-## Table of contents
-- Overview
-- Features
-- Repository layout
-- Installation
-- Quick start (example sketch)
-- Usage details
-  - Captive portal behavior
-  - Serial configuration commands
-  - Public API (overview)
-- Customizing the portal (HTML, AP name, timeouts)
-- Utilities (html_to_header.py)
-- Troubleshooting
-- Contributing
-- References to repo files
-- License
+**ESPWiFiManager** is a lightweight, smart, and non-blocking Wi-Fi configuration library for **ESP32** and **ESP8266**. It features a modern web-based captive portal and a powerful serial command interface, allowing you to manage multiple Wi-Fi credentials seamlessly at runtime.
 
 ---
 
-## Overview
-ESPWiFiManager lets an ESP32 or ESP8266 automatically attempt to connect to the strongest known network and fall back to a Wi‑Fi configuration portal when it cannot connect. The device acts as an Access Point (AP) and a webserver that hosts a simple UI for entering an SSID and password. Once credentials are saved, the library persists them in non-volatile storage (NVS for ESP32 or EEPROM for ESP8266). The user can then interact with the manager non-blockingly.
+## 🌟 Features
 
-## Features
-- **Smart Connect (RSSI Sorting):** Automatically scans and connects to the strongest known network in range.
-- **Non-blocking Architecture:** Connections are handled entirely in the background without `while()` loops, keeping your main loop fluid.
-- **FIFO Credential Memory:** Limits saved networks (10 for ESP32, 5 for ESP8266) and automatically removes the oldest when full.
-- **Centralized Command Routing:** Allows passing string commands dynamically (e.g., `wifiManager.executeCommand("ADD \"SSID\" \"PASS\"", Serial)`).
-- **Embedded Web UI:** Auto-redirects to the setup page when the device is in AP mode (captive portal behavior).
-- **Zero External Dependencies:** Uses the default ESP32/ESP8266 Wi‑Fi and WebServer libraries.
-- **Python Utility included:** Convert standalone HTML pages into an embedded C header.
+- **🧠 Smart Connect (RSSI Sorting):** Automatically scans and connects to the strongest known network in range.
+- **⚡ Non-blocking Architecture:** Designed with a state-machine approach. No `delay()` or `while()` loops that freeze your main logic.
+- **📑 Multi-Credential Memory:** 
+  - **ESP32:** Stores up to **10** networks using Preferences (NVS).
+  - **ESP8266:** Stores up to **5** networks using EEPROM.
+  - **FIFO Logic:** Automatically overwrites the oldest network when the limit is reached.
+- **🌐 Web-based Captive Portal:** 
+  - Automated redirection to setup page.
+  - Built-in API for scan, save, list, and delete operations.
+  - Fully customizable HTML/CSS/JS.
+- **📟 Serial Command Interface:** Manage Wi-Fi via Serial Monitor using human-readable commands (e.g., `ADD "MySSID" "MyPass"`).
+- **🛠️ Developer-Friendly:** No complex dependencies except `ArduinoJson`.
+- **🐍 Conversion Utility:** Includes a Python script to compress and convert your HTML designs into C++ header files.
 
-## Repository layout
-- `src/`
-  - `ESPWiFiManager.h`
-  - `ESPWiFiManager.cpp`
-  - `page_index.h` (generated from utils/index.html)
-- `utils/`
-  - `index.html` (web UI template for the captive portal)
-  - `html_to_header.py` (script to convert index.html into page_index.h)
-- `example/`
-  - `BasicUsage/BasicUsage.ino` (example sketch)
-- `library.properties`
-- `README.md`
+---
 
-## Installation
-There are two common ways to add this library to your Arduino/PlatformIO project:
+## 📂 Repository Layout
 
-1. **Manual (copy)**
-   - Copy the repository into your Arduino Library folder (`Documents/Arduino/libraries/ESPWiFiManager`).
-   - Ensure `ESPWiFiManager.h` and `ESPWiFiManager.cpp` are visible to your build system.
+```text
+ESPWiFiManager/
+├── src/
+│   ├── ESPWiFiManager.h        <- Main library header
+│   ├── ESPWiFiManager.cpp      <- Core logic implementation
+│   └── page_index.h            <- Embedded Web UI (Generated)
+├── utils/
+│   ├── index.html              <- Source HTML for the portal
+│   └── html_to_header.py       <- HTML-to-Header conversion tool
+├── examples/
+│   └── BasicUsage/             <- Standard implementation example
+├── library.properties          <- Metadata for Arduino IDE
+└── README.md                   <- This file
+```
 
-2. **PlatformIO**
-   - Add the library to your project `lib/` folder or add a library dependency entry that points to the local copy or GitHub repository.
+---
 
-*Note: If the captive portal HTML is modified, regenerate `page_index.h` using the python script in `utils/`.*
+## 🏗️ How it Works (The State Machine)
 
-## Quick start (example sketch)
-This is the recommended non-blocking usage pattern. Check the header file for exact method names.
+The library moves through several states to ensure a smooth user experience without blocking your code.
+
+```mermaid
+graph TD
+    A[IDLE] -->|connectToWiFi| B[SCANNING]
+    B -->|Networks Found| C[CONNECTING]
+    B -->|No Networks| F[FAILED]
+    C -->|Success| D[CONNECTED]
+    C -->|Timeout/Error| E[Try Next Network]
+    E -->|No more matches| F[FAILED]
+    F -->|startAPMode| G[AP_MODE]
+    G -->|User saves credentials| B
+```
+
+---
+
+## 🚀 Quick Start
+
+### 1. Basic Implementation
+Here is the core logic required to get your device online.
 
 ```cpp
+#include <ESPWiFiManager.h>
+
+// WebServer instance (ESP32: WebServer.h, ESP8266: ESP8266WebServer.h)
 #if defined(ESP32)
-  #include <WiFi.h>
   #include <WebServer.h>
   WebServer server(80);
-#elif defined(ESP8266)
-  #include <ESP8266WiFi.h>
+#else
   #include <ESP8266WebServer.h>
   ESP8266WebServer server(80);
 #endif
 
-#include <ESPWiFiManager.h>
-
-// Initialize library
-WiFiManager wifiManager("Cypher_Portal", "12345678");
-
-bool apModeStarted = false;
-bool connectionHandled = false;
+// Initialize Manager: (AP_SSID, AP_Password)
+WiFiManager wifiManager("Config_Portal", "12345678");
 
 void setup() {
   Serial.begin(115200);
-  delay(1000); 
-
+  
+  // 1. Initialize internals
   wifiManager.begin();
   
-  Serial.println("\n[Main] Initiating Non-blocking WiFi Connection...");
-  // Start the background connection process
+  // 2. Trigger connection attempt
   wifiManager.connectToWiFi();
 }
 
 void loop() {
-  // 1. Process WiFi Manager (Handles scanning, connection timeouts, and web UI)
+  // 3. Keep the manager processing (Essential!)
   wifiManager.process();
 
-  // Handle incoming commands dynamically over the Serial Monitor
-  if (Serial.available()) {
-    String serialData = Serial.readStringUntil('\n');
-    serialData.trim();
-    if (serialData.startsWith("WIFI")) {
-      String wifiCmd = serialData.substring(5); 
-      wifiManager.executeCommand(wifiCmd, Serial);
-    }
-  }
-
-  // 2. Application Logic based on State Machine
-  WiFiState currentState = wifiManager.getState();
-
-  if (currentState == WIFI_STATE_CONNECTED && !connectionHandled) {
-    Serial.println("[Main] Wi-Fi is Connected! Starting Web Server for general UI...");
-    wifiManager.setServer(&server);
-    
-    // Example route for your main application
-    server.on("/hello", []() {
-      server.send(200, "text/plain", "Hello from CypherNode!");
-    });
-    
-    server.begin(); 
-    connectionHandled = true;
+  // Handle various states
+  WiFiState state = wifiManager.getState();
+  
+  if (state == WIFI_STATE_CONNECTED) {
+    // Successfully connected!
+    // wifiManager.setServer(&server); // Optional: Rebind if you want to use the server for other things
   } 
-  else if (currentState == WIFI_STATE_FAILED && !apModeStarted) {
-    Serial.println("[Main] All connections failed. Falling back to AP Mode.");
+  else if (state == WIFI_STATE_FAILED) {
+    // Connection failed, let's start the AP portal
     wifiManager.startAPMode(server);
-    apModeStarted = true;
+  }
+  
+  // Handle Serial Commands (Optional)
+  if (Serial.available()) {
+    wifiManager.executeCommand(Serial.readStringUntil('\n'));
   }
 }
 ```
 
-## Usage details
+---
 
-### Captive portal behavior
-- When the ESP device cannot connect to Wi‑Fi, it sets its state to `WIFI_STATE_FAILED`. You can detect this and boot an Access Point (AP).
-- Calling `startAPMode(server)` assigns the provided web server instance to manage captive portal routing.
-- DNS is hijacked so any domain request points to the setup UI.
+## 🛠️ Public API Overview
 
-### Serial configuration commands
-- Using `executeCommand()`, you can route custom strings into the manager. Typical commands are:
-  - `ADD "SSID" "PASS"` - Add or update a credential.
-  - `DEL "SSID"` - Remove a network.
-  - `LIST` - List networks.
-  - `CLEAR` - Erase all credentials.
-  - `STATUS` - Fetch the current active state and IP.
+| Method | Description |
+| :--- | :--- |
+| `begin()` | Loads saved credentials and initializes hardware. |
+| `connectToWiFi()` | Triggers an RSSI-sorted scan and connection attempt. |
+| `process()` | **Must be called in `loop()`**. Handles timing and state transitions. |
+| `startAPMode(server)` | Starts the SoftAP and configures Captive Portal routes. |
+| `setServer(&server)` | Attaches the manager to your existing web server instance. |
+| `getState()` | Returns current state (`WIFI_STATE_CONNECTED`, `WIFI_STATE_AP_MODE`, etc.). |
+| `executeCommand(cmd)` | Parses and executes a command string (Serial/Console). |
 
-### Public API (overview)
-- `WiFiManager(ap_ssid, ap_password)` — constructor.
-- `begin()` — Initialize internals.
-- `connectToWiFi()` — Non-blocking trigger to scan and connect using RSSI sorting.
-- `process()` — Must be placed inside `loop()`. Manages state timeouts and web handler pipelines non-blockingly.
-- `startAPMode(server)` — Starts SoftAP.
-- `setServer(&server)` — Rebind the manager to the general Web Server after connection so credentials can be edited.
-- `getState()` — Returns `WiFiState` enum (`IDLE`, `SCANNING`, `CONNECTING`, `CONNECTED`, `FAILED`, `AP_MODE`).
-- `executeCommand(cmdStr, io)` — Passthrough for serial interactions.
+---
 
-## Customizing the portal (HTML, AP name, timeouts)
-- The captive portal UI is embedded in `src/page_index.h` as an `unsigned char` array.
-- To customize the UI:
-  1. Edit `utils/index.html`.
-  2. Use `utils/html_to_header.py` to convert the HTML into `page_index.h`.
-     ```bash
-     python3 utils/html_to_header.py utils/index.html
-     ```
-     This automatically creates `src/page_index.h` keeping the structure clean.
-  3. Recompile the Arduino sketch to deploy changes.
+## ⌨️ Serial Commands
 
-## Utilities
-- `utils/index.html` - Default web UI.
-- `utils/html_to_header.py` - Compression and conversion script.
+Open your Serial Monitor (115200 baud) and send these commands:
 
-## Troubleshooting
-- **Portal does not appear:** Confirm that `wifiManager.startAPMode(server)` was called (typically triggered when `getState() == WIFI_STATE_FAILED`). Connect to the device AP and visit `192.168.4.1`.
-- **Cannot connect after saving credentials:** Check serial monitor to verify credentials passed validation. Max storage is 10 connections (ESP32) or 5 (ESP8266).
-- **HTML changes do not show:** Make sure you ran the `html_to_header.py` script and successfully reflashed the firmware.
+- `ADD "SSID" "PASSWORD"` : Saves a new network.
+- `DEL "SSID"` : Deletes a saved network.
+- `LIST` : Shows all saved credentials.
+- `CLEAR` : Deletes all saved networks.
+- `STATUS` : Prints current connection status and IP address.
 
-## Contributing
-Contributions and bug reports are welcome. If you modify the portal HTML, generate the `page_index.h` and include both in your pull request. 
+---
 
-Please provide device logs and board details when filing an issue!
+## 🎨 Customizing the Portal
 
-## References to repo files
-- Source files:
-  - `src/ESPWiFiManager.h`
-  - `src/ESPWiFiManager.cpp`
-  - `src/page_index.h`
-- Utilities:
-  - `utils/index.html`
-  - `utils/html_to_header.py`
+1. **Design:** Modify `utils/index.html` to your liking. (The library expects `index.html` to generate `page_index.h`).
+2. **Convert:** Run the Python utility to compress and update the embedded C++ header using Gzip:
+   ```bash
+   python utils/html_to_header.py utils/index.html
+   ```
+   *The script will automatically create/update `src/page_index.h`.*
+3. **Flash:** Recompile and upload your code to the ESP device.
 
-## License
-This project is released under the MIT License. See the LICENSE file in the repository for details.
+> [!NOTE]
+> The Python utility uses **Gzip compression (level 9)** to transform your HTML into a memory-efficient C header, significantly reducing the flash footprint.
+
+---
+
+## ⚠️ Troubleshooting
+
+> [!TIP]
+> **Captive Portal not appearing?**
+> Ensure your phone/PC is connected to the device's Access Point. If the browser doesn't auto-redirect, manually visit `192.168.4.1`.
+
+> [!IMPORTANT]
+> **ESP8266 Memory Limit:**
+> ESP8266 is limited to 5 credentials due to EEPROM sizing. Keep your SSIDs and passwords reasonably short to ensure data integrity.
+
+- **Fails to Connect:** Check if the signal strength (RSSI) of your router is too weak.
+- **Serial Commands Not Working:** Ensure your line ending is set to `Newline` or `Both NL & CR` in the Serial Monitor.
+
+---
+
+## 📜 License
+This library is licensed under the **MIT License**. Feel free to use it in your personal or commercial projects.
+
+---
+*Developed by **Cypher-Z** - Helping you build smarter IoT solutions.*
