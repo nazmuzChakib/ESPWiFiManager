@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 html_to_header.py
 =================
@@ -6,7 +7,7 @@ Convert an HTML file into a gzip-compressed C header (xxd -i style).
 
 Pipeline
 --------
-    Original HTML  →  Minified HTML  →  JS-Obfuscated HTML  →  Gzip  →  C Header
+    Original HTML  ->  Minified HTML  ->  JS-Obfuscated HTML  ->  Gzip  ->  C Header
 
 Sizes at every stage are recorded inside the generated header as comments.
 
@@ -22,11 +23,12 @@ Flags
 Output
 ------
     Saves the generated header into the 'src' folder relative to where
-    this script lives (e.g. utils/  →  src/page_index.h).
+    this script lives (e.g. utils/  ->  src/page_index.h).
 
 Requirements
 ------------
-    pip install htmlmin jsmin  (optional but recommended)
+    pip install minify-html jsmin  (optional but recommended)
+    Works with Python 3.10+
 """
 
 import sys
@@ -41,28 +43,34 @@ from datetime import datetime
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _try_minify_html(source: str) -> str:
-    """Minify HTML using htmlmin if available, else fall back to basic strip."""
+    """Minify HTML using minify-html if available, else fall back to regex strip.
+
+    minify-html (pip install minify-html) is a fast Rust-backed minifier that
+    works with Python 3.10+ and does not rely on the removed `cgi` module.
+    """
     try:
-        import htmlmin  # type: ignore
-        return htmlmin.minify(
+        import minify_html  # type: ignore
+        return minify_html.minify(
             source,
-            remove_comments=True,
-            remove_empty_space=True,
-            reduce_boolean_attributes=True,
-            remove_optional_attribute_quotes=False,
+            minify_js=False,   # JS is handled separately by jsmin
+            minify_css=True,
+            remove_processing_instructions=True,
         )
     except ImportError:
-        print("  ⚠  'htmlmin' not installed – falling back to basic whitespace strip.")
-        print("       Install with: pip install htmlmin")
-        # Basic fallback: collapse runs of whitespace (not inter-tag newlines)
-        minified = re.sub(r'<!--.*?-->', '', source, flags=re.DOTALL)      # strip HTML comments
-        minified = re.sub(r'>\s+<', '><', minified)                        # strip whitespace between tags
-        minified = re.sub(r'\s{2,}', ' ', minified)                        # collapse extra spaces
+        print("  [!] 'minify-html' not installed - using regex fallback.")
+        print("       Install with: pip install minify-html")
+        # Basic fallback
+        minified = re.sub(r'<!--.*?-->', '', source, flags=re.DOTALL)
+        minified = re.sub(r'>\s+<', '><', minified)
+        minified = re.sub(r'\s{2,}', ' ', minified)
         return minified.strip()
 
 
 def _try_minify_js_inside_html(source: str) -> str:
-    """Minify <script> blocks inside HTML using jsmin if available."""
+    """Minify <script> blocks inside HTML using jsmin if available.
+
+    jsmin (pip install jsmin) works on Python 3.10+.
+    """
     try:
         from jsmin import jsmin  # type: ignore
 
@@ -82,8 +90,8 @@ def _try_minify_js_inside_html(source: str) -> str:
             source,
             flags=re.DOTALL | re.IGNORECASE,
         )
-    except ImportError:
-        print("  ⚠  'jsmin' not installed – JS inside <script> not minified.")
+    except Exception as exc:
+        print("  [!] jsmin unavailable or failed (%s) - JS not minified." % exc)
         print("       Install with: pip install jsmin")
         return source
 
@@ -236,8 +244,8 @@ def html_to_header(filepath: str, do_minify: bool = True, do_obfuscate: bool = T
     original_text = raw_bytes.decode("utf-8", errors="replace")
 
     size_original = len(raw_bytes)
-    print(f"\n📄 Input  : {os.path.abspath(filepath)}")
-    print(f"   Original size : {_fmt_bytes(size_original)}")
+    print("\n[INPUT] %s" % os.path.abspath(filepath))
+    print("   Original size : %s" % _fmt_bytes(size_original))
 
     current_text = original_text
     size_minified   = size_original   # defaults (unchanged if step skipped)
@@ -245,37 +253,37 @@ def html_to_header(filepath: str, do_minify: bool = True, do_obfuscate: bool = T
 
     # ── Step 2: Minify ───────────────────────────────────────────────────────
     if do_minify:
-        print("\n🔧 Step 2 – Minifying HTML …")
+        print("\n[2/4] Minifying HTML...")
         current_text = _try_minify_html(current_text)
         current_text = _try_minify_js_inside_html(current_text)
         size_minified = len(current_text.encode("utf-8"))
-        print(f"   Minified size : {_fmt_bytes(size_minified)}"
-              f"  (reduced by {_reduction(size_original, size_minified)})")
+        print("   Minified size : %s  (reduced by %s)" % (
+            _fmt_bytes(size_minified), _reduction(size_original, size_minified)))
     else:
-        print("\n⏭  Step 2 – Minification skipped (--no-minify)")
+        print("\n[2/4] Minification skipped (--no-minify)")
         size_minified = size_original
 
     # ── Step 3: Obfuscate ────────────────────────────────────────────────────
     if do_obfuscate:
-        print("\n🔒 Step 3 – Obfuscating JS identifiers …")
+        print("\n[3/4] Obfuscating JS identifiers...")
         current_text = _obfuscate_js_inside_html(current_text)
         size_obfuscated = len(current_text.encode("utf-8"))
-        print(f"   Obfuscated size : {_fmt_bytes(size_obfuscated)}"
-              f"  (reduced by {_reduction(size_minified, size_obfuscated)} vs minified)")
+        print("   Obfuscated size : %s  (reduced by %s vs minified)" % (
+            _fmt_bytes(size_obfuscated), _reduction(size_minified, size_obfuscated)))
     else:
-        print("\n⏭  Step 3 – Obfuscation skipped (--no-obfuscate)")
+        print("\n[3/4] Obfuscation skipped (--no-obfuscate)")
         size_obfuscated = size_minified
 
     # ── Step 4: Gzip ─────────────────────────────────────────────────────────
-    print("\n📦 Step 4 – GZip compressing (level 9) …")
+    print("\n[4/4] GZip compressing (level 9)...")
     processed_bytes = current_text.encode("utf-8")
     compressed      = gzip.compress(processed_bytes, compresslevel=9)
     size_gzip       = len(compressed)
-    print(f"   Compressed size : {_fmt_bytes(size_gzip)}"
-          f"  (reduced by {_reduction(size_original, size_gzip)} vs original)")
+    print("   Compressed size : %s  (reduced by %s vs original)" % (
+        _fmt_bytes(size_gzip), _reduction(size_original, size_gzip)))
 
     # ── Step 5: Write header ─────────────────────────────────────────────────
-    print(f"\n💾 Step 5 – Writing header to: {os.path.abspath(output_filename)}")
+    print("\n[OUT] Writing header: %s" % os.path.abspath(output_filename))
 
     with open(output_filename, "w", newline="\n", encoding="utf-8") as out:
 
@@ -363,10 +371,11 @@ def html_to_header(filepath: str, do_minify: bool = True, do_obfuscate: bool = T
 
         out.write(f"#endif /* {guard} */\n")
 
-    print(f"\n✅ Done! Generated: {os.path.abspath(output_filename)}")
-    print(f"   Final payload : {_fmt_bytes(size_gzip)} "
-          f"(saved {_fmt_bytes(size_original - size_gzip)} / "
-          f"{_reduction(size_original, size_gzip)} vs original)\n")
+    print("\n[DONE] Generated : %s" % os.path.abspath(output_filename))
+    print("   Final payload : %s  (saved %s / %s vs original)\n" % (
+        _fmt_bytes(size_gzip),
+        _fmt_bytes(size_original - size_gzip),
+        _reduction(size_original, size_gzip)))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -25,6 +25,9 @@
 /.DS_Store
 Thumbs.db
 
+# Ignore index.html file 
+
+
 # PlatformIO / env
 .platformio
 .env
@@ -42,11 +45,9 @@ node_modules/
 !/src/
 !/src/**
 
-!/utilis/
-!/utilis/**
-
 !/utils/
 !/utils/**
+utils/index.html
 
 !/examples/
 !/examples/**
