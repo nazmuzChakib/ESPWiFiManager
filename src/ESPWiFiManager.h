@@ -7,25 +7,37 @@
 #include <vector>
 #include <algorithm>
 
+// Uncomment the next line to use ESPAsyncWebServer instead of standard WebServer
+// #define WIFIMANAGER_USE_ASYNC_WEBSERVER
+
 // ---------------- Cross-Platform Support & Memory Limit ----------------
+#ifdef WIFIMANAGER_USE_ASYNC_WEBSERVER
+  #include <ESPAsyncWebServer.h>
+  typedef AsyncWebServer ESP_WebServer;
+#endif
+
 #if defined(ESP32)
   #include <WiFi.h>
-  #include <WebServer.h>
+  #ifndef WIFIMANAGER_USE_ASYNC_WEBSERVER
+    #include <WebServer.h>
+    typedef WebServer ESP_WebServer;
+  #endif
   #include <Preferences.h>
-  typedef WebServer ESP_WebServer;
-  static constexpr size_t MAX_CREDENTIALS = 10; // ESP32 এর জন্য সর্বোচ্চ ১০টি
+  static constexpr size_t MAX_CREDENTIALS = 10; // max 10 for ESP32
 #elif defined(ESP8266)
   #include <ESP8266WiFi.h>
-  #include <ESP8266WebServer.h>
+  #ifndef WIFIMANAGER_USE_ASYNC_WEBSERVER
+    #include <ESP8266WebServer.h>
+    typedef ESP8266WebServer ESP_WebServer;
+  #endif
   #include <EEPROM.h>
-  typedef ESP8266WebServer ESP_WebServer;
-  static constexpr size_t MAX_CREDENTIALS = 5;  // ESP8266 এর জন্য সর্বোচ্চ ৫টি
+  static constexpr size_t MAX_CREDENTIALS = 5;  // Max 5 for ESP8266
 #else
   #error "This library only supports ESP32 and ESP8266"
 #endif
 
 extern const unsigned char page_index[]; // From page_index.h
-extern unsigned int page_index_len;
+extern const unsigned int page_index_len;
 
 // ---------------- State Machine Enum ----------------
 /**
@@ -47,8 +59,7 @@ class WiFiManager {
 public:
   /**
    * @brief Constructs a new WiFiManager object.
-   * 
-   * @param ap_ssid The SSID for the Access Point.
+   * * @param ap_ssid The SSID for the Access Point.
    * @param ap_password The password for the Access Point.
    */
   WiFiManager(const char* ap_ssid, const char* ap_password);
@@ -70,22 +81,19 @@ public:
 
   /**
    * @brief Starts the Access Point mode and configures the web server routes.
-   * 
-   * @param server Reference to the web server instance.
+   * * @param server Reference to the web server instance.
    */
   void startAPMode(ESP_WebServer& server);
 
   /**
    * @brief Sets the web server instance for routing.
-   * 
-   * @param server Pointer to the web server instance.
+   * * @param server Pointer to the web server instance.
    */
   void setServer(ESP_WebServer* server);
 
   /**
    * @brief Gets the current state of the WiFi manager.
-   * 
-   * @return WiFiState The current WiFi connection state.
+   * * @return WiFiState The current WiFi connection state.
    */
   WiFiState getState() const;
 
@@ -101,8 +109,7 @@ public:
 
   /**
    * @brief Deletes a saved WiFi credential.
-   * 
-   * @param ssid The SSID of the credential to delete.
+   * * @param ssid The SSID of the credential to delete.
    */
   void deleteCredential(const char* ssid);
 
@@ -118,24 +125,29 @@ public:
 
   /**
    * @brief Returns a JSON string containing the saved credentials.
-   * 
-   * @return String JSON representation of the credentials.
+   * * @return String JSON representation of the credentials.
    */
   String getCredentialsJson() const;
 
   /**
    * @brief Processes serial commands for managing the WiFiManager.
-   * 
-   * @param io Stream object to read from and write to (default is Serial).
+   * * @param io Stream object to read from and write to (default is Serial).
    */
   void executeCommand(String cmdLine, Stream& io = Serial);
 
 private:
   const char* _ap_ssid;
   const char* _ap_password;
+
+  // Flags
+  bool _disconnectTriggered = false;
   
   ESP_WebServer* _server = nullptr;
   DNSServer _dnsServer;
+
+#if defined(ESP8266)
+  WiFiEventHandler _disconnectHandler; // Safe scope for ESP8266 Event Handler
+#endif
 
   // State Tracking
   WiFiState _currentState = WIFI_STATE_IDLE;
@@ -163,15 +175,13 @@ private:
 
   /**
    * @brief Loads the credentials data from persistent storage.
-   * 
-   * @return String JSON data containing the credentials.
+   * * @return String JSON data containing the credentials.
    */
   String _loadData() const;
 
   /**
    * @brief Saves the credentials data to persistent storage.
-   * 
-   * @param data JSON string to save.
+   * * @param data JSON string to save.
    */
   void _saveData(const String& data);
 
@@ -181,6 +191,11 @@ private:
    * @brief Checks the WiFi scan status and matches against saved credentials.
    */
   void _checkScanStatus();
+
+  /**
+   * @brief Set up low-level event listeners for WiFi disconnects
+   */
+  void _setupEventHandlers();
 
   /**
    * @brief Attempts connection to the next matched network.
@@ -196,52 +211,29 @@ private:
 
   /**
    * @brief Decodes a URL-encoded string.
-   * 
-   * @param str The URL-encoded string.
-   * @return String The decoded string.
    */
   static String _urlDecode(const String& str);
 
   /**
    * @brief Splits a command line string into parts, respecting quotes.
-   * 
-   * @param line The command line string.
-   * @param outParts Array to hold the resulting parts.
-   * @param maxParts Maximum number of parts to split into.
-   * @return int The number of parts successfully separated.
    */
   static int _splitArgsQuoted(const String& line, String outParts[], int maxParts);
 
   // Web Handlers
 
-  /**
-   * @brief Handles the root web server route.
-   */
+#ifdef WIFIMANAGER_USE_ASYNC_WEBSERVER
+  void _handleRoot(AsyncWebServerRequest *request);
+  void _handleScan(AsyncWebServerRequest *request);
+  void _handleSave(AsyncWebServerRequest *request);
+  void _handleList(AsyncWebServerRequest *request);
+  void _handleDelete(AsyncWebServerRequest *request);
+#else
   void _handleRoot();
-
-  /**
-   * @brief Handles the WiFi scan request route.
-   */
   void _handleScan();
-
-  /**
-   * @brief Handles the credential save request route.
-   */
   void _handleSave();
-
-  /**
-   * @brief Handles the credential list request route.
-   */
   void _handleList();
-
-  /**
-   * @brief Handles the credential delete request route.
-   */
   void _handleDelete();
-
-  /**
-   * @brief Prints the available serial commands.
-   */
+#endif
   void _printHelp();
 };
 
