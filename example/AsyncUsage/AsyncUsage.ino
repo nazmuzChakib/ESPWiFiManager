@@ -1,19 +1,24 @@
-/*
- * ESPWiFiManager - AsyncWebServer Example
- * 
- * IMPORTANT: To run this example, you MUST uncomment the following line
- * inside the `src/ESPWiFiManager.h` file:
- * #define WIFIMANAGER_USE_ASYNC_WEBSERVER
- * 
- * Dependencies:
- * - ESPAsyncWebServer library
- * - AsyncTCP (for ESP32) or ESPAsyncTCP (for ESP8266)
+/**
+ * @file AsyncUsage.ino
+ * @brief Non-blocking ESPWiFiManager example — ESPAsyncWebServer edition.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ *  BEFORE compiling this example:
+ *
+ *  1. Open  libraries/ESPWiFiManager/src/ESPWiFiManagerConfig.h
+ *  2. Uncomment the following line:
+ *       #define WIFIMANAGER_USE_ASYNC_WEBSERVER
+ *
+ *  That is the only change needed — do not modify your sketch.
+ *
+ *  Required libraries (install via Arduino Library Manager or PlatformIO):
+ *    • ESPAsyncWebServer
+ *    • AsyncTCP       (ESP32)
+ *    • ESPAsyncTCP    (ESP8266)
+ * ─────────────────────────────────────────────────────────────────────────
  */
 
-#include <Arduino.h>
-#include <ESPWiFiManager.h>
-
-// 1. Include Async Web Server headers based on the platform
+// ── Platform TCP dependency ────────────────────────────────────────────────
 #if defined(ESP32)
   #include <WiFi.h>
   #include <AsyncTCP.h>
@@ -23,43 +28,42 @@
 #endif
 #include <ESPAsyncWebServer.h>
 
-// 2. Create the AsyncWebServer instance on port 80
+#include <ESPWiFiManager.h>
+
+// ── Global instances ───────────────────────────────────────────────────────
 AsyncWebServer server(80);
+WiFiManager    wifiManager("ESP_Async_Portal", "12345678");
 
-// 3. Initialize ESPWiFiManager (AP_SSID, AP_Password)
-WiFiManager wifiManager("ESP_Async_Portal", "12345678");
+bool apModeStarted = false;
 
+// ── Setup ──────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n--- ESPWiFiManager Async Example ---");
-  
-  // 4. Initialize internals (loads saved credentials)
+
   wifiManager.begin();
-  
-  // 5. Trigger connection attempt (Smart Connect)
   wifiManager.connectToWiFi();
 }
 
+// ── Loop ───────────────────────────────────────────────────────────────────
 void loop() {
-  // 6. Keep the manager processing (Essential for state transitions and DNS)
+  // Drive the state machine — AsyncWebServer handles its own requests
   wifiManager.process();
 
-  // 7. Handle state transitions
-  WiFiState state = wifiManager.getState();
-  static bool apModeStarted = false;
-
-  if (state == WIFI_STATE_FAILED && !apModeStarted) {
-    // Connection failed. Start the captive portal using the AsyncWebServer.
-    Serial.println("Starting Captive Portal in AP Mode...");
+  if (wifiManager.getState() == WIFI_STATE_FAILED && !apModeStarted) {
+    Serial.println("[Main] Starting Captive Portal (Async)...");
     wifiManager.startAPMode(server);
     apModeStarted = true;
   }
-  
-  // 8. Handle Serial Commands (Optional)
-  // Available commands: ADD "SSID" "PASS", DEL "SSID", LIST, CLEAR, STATUS
+
+  // Optional serial commands: WIFI ADD "SSID" "PASS" | WIFI LIST | etc.
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
-    wifiManager.executeCommand(cmd);
+    cmd.trim();
+    if (cmd.startsWith("WIFI "))
+      wifiManager.executeCommand(cmd.substring(5));
   }
+
+  // Your application logic here — fully non-blocking!
 }
