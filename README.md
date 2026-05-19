@@ -12,6 +12,8 @@
 
 - **🧠 Smart Connect (RSSI Sorting):** Automatically scans and connects to the strongest known network in range.
 - **⚡ Non-blocking Architecture:** Designed with a state-machine approach. No `delay()` or `while()` loops that freeze your main logic.
+- **🏭 Industrial Grade Reliability:** Avoids dynamic memory allocations (`std::vector`) in critical code paths to prevent memory fragmentation and leakage.
+- **📡 Low-level Connection Management:** Incorporates ESP-IDF core functions (`esp_wifi_set_ps(WIFI_PS_NONE)`) on ESP32 to eliminate power-save induced connection drops and high latency.
 - **📑 Multi-Credential Memory:** 
   - **ESP32:** Stores up to **10** networks using Preferences (NVS).
   - **ESP8266:** Stores up to **5** networks using EEPROM.

@@ -44,7 +44,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <DNSServer.h>
-#include <vector>
 #include <algorithm>
 #include "page_index.h"
 
@@ -58,6 +57,7 @@
 #if defined(ESP32)
   #include <WiFi.h>
   #include <Preferences.h>
+  #include <esp_wifi.h>
   #ifndef WIFIMANAGER_USE_ASYNC_WEBSERVER
     #include <WebServer.h>
     typedef WebServer ESP_WebServer;
@@ -197,10 +197,13 @@ private:
   unsigned long _scanStartTime      = 0;
 
   // ── Smart-connect bookkeeping ─────────────────────────────────────────
-  std::vector<String> _matchedSSIDs;
-  std::vector<String> _matchedPasses;
+  String _matchedSSIDs[MAX_CREDS];
+  String _matchedPasses[MAX_CREDS];
+  int  _matchedCount        = 0;
   int  _currentNetworkIndex = 0;
   bool _isConnecting        = false;
+  bool _initialized         = false;
+  bool _routesRegistered    = false;
 
   // ── Server / DNS ──────────────────────────────────────────────────────
   ESP_WebServer* _server = nullptr;

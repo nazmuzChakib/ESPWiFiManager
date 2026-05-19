@@ -134,8 +134,10 @@ void WiFiManager::listCredentialsToSerial() const {
 // ══════════════════════════════════════════════════════════════════════════
 
 void WiFiManager::begin() {
+  if (_initialized) return;
   _setupEventHandlers();
   _printHelp();
+  _initialized = true;
 }
 
 void WiFiManager::_setupEventHandlers() {
@@ -166,6 +168,12 @@ void WiFiManager::_setupEventHandlers() {
 void WiFiManager::connectToWiFi() {
   Serial.println(F("[WiFiManager] Scanning for known networks..."));
   WiFi.mode(WIFI_STA);
+
+#if defined(ESP32)
+  // Disable power saving to improve latency, reduce connection drops and prevent ping losses in noisy/industrial environments.
+  esp_wifi_set_ps(WIFI_PS_NONE);
+#endif
+
   WiFi.disconnect(false); // false = keep the radio on (avoids modem off on ESP32)
   delay(50);
   WiFi.scanNetworks(/*async=*/true, /*showHidden=*/true);
@@ -194,8 +202,7 @@ void WiFiManager::_checkScanStatus() {
   }
 
   // Scan complete (n >= 0) — match against saved credentials
-  _matchedSSIDs.clear();
-  _matchedPasses.clear();
+  _matchedCount = 0;
 
   String json = _loadData();
   JsonDocument doc;
@@ -205,8 +212,9 @@ void WiFiManager::_checkScanStatus() {
 
     if (n > 0) {
       // Collect matches and deduplicate, keeping the best RSSI for each SSID
-      struct Match { String ssid, pass; int32_t rssi; };
-      std::vector<Match> found;
+      struct Match { String ssid; String pass; int32_t rssi; };
+      Match found[MAX_CREDS];
+      int foundCount = 0;
 
       for (int i = 0; i < n; ++i) {
         String  scanned = WiFi.SSID(i);
@@ -215,40 +223,48 @@ void WiFiManager::_checkScanStatus() {
         for (JsonObject cred : arr) {
           if (scanned == cred["ssid"].as<String>()) {
             bool exists = false;
-            for (auto& f : found) {
-              if (f.ssid == scanned) {
+            for (int j = 0; j < foundCount; ++j) {
+              if (found[j].ssid == scanned) {
                 exists = true;
-                if (rssi > f.rssi) f.rssi = rssi; // keep strongest RSSI
+                if (rssi > found[j].rssi) found[j].rssi = rssi; // keep strongest RSSI
                 break;
               }
             }
-            if (!exists) found.push_back({scanned, cred["password"].as<String>(), rssi});
+            if (!exists && foundCount < (int)MAX_CREDS) {
+              found[foundCount++] = {scanned, cred["password"].as<String>(), rssi};
+            }
             break; // stop inner credential loop once SSID is matched
           }
         }
       }
 
       // Sort strongest signal first
-      std::sort(found.begin(), found.end(),
+      std::sort(found, found + foundCount,
                 [](const Match& a, const Match& b){ return a.rssi > b.rssi; });
 
-      for (const auto& f : found) {
-        _matchedSSIDs.push_back(f.ssid);
-        _matchedPasses.push_back(f.pass);
-        Serial.printf("[WiFiManager] Matched: %s (RSSI: %d)\n", f.ssid.c_str(), f.rssi);
+      for (int i = 0; i < foundCount; ++i) {
+        if (_matchedCount < (int)MAX_CREDS) {
+          _matchedSSIDs[_matchedCount] = found[i].ssid;
+          _matchedPasses[_matchedCount] = found[i].pass;
+          _matchedCount++;
+          Serial.printf("[WiFiManager] Matched: %s (RSSI: %d)\n", found[i].ssid.c_str(), found[i].rssi);
+        }
       }
     } else {
       // No visible networks — try all saved credentials sequentially as fallback
       for (JsonObject cred : arr) {
-        _matchedSSIDs.push_back(cred["ssid"].as<String>());
-        _matchedPasses.push_back(cred["password"].as<String>());
+        if (_matchedCount < (int)MAX_CREDS) {
+          _matchedSSIDs[_matchedCount] = cred["ssid"].as<String>();
+          _matchedPasses[_matchedCount] = cred["password"].as<String>();
+          _matchedCount++;
+        }
       }
     }
   }
 
   WiFi.scanDelete();
 
-  if (_matchedSSIDs.empty()) {
+  if (_matchedCount == 0) {
     Serial.println(F("[WiFiManager] No known networks found."));
     _currentState = WIFI_STATE_FAILED;
     return;
@@ -260,7 +276,7 @@ void WiFiManager::_checkScanStatus() {
 }
 
 void WiFiManager::_startNextConnection() {
-  if (_currentNetworkIndex >= (int)_matchedSSIDs.size()) {
+  if (_currentNetworkIndex >= _matchedCount) {
     Serial.println(F("[WiFiManager] All networks exhausted. Connection failed."));
     _currentState = WIFI_STATE_FAILED;
     _isConnecting = false;
@@ -344,21 +360,24 @@ void WiFiManager::startAPMode(ESP_WebServer& server) {
 
   _dnsServer.start(53, "*", WiFi.softAPIP());
 
+  if (!_routesRegistered) {
 #ifdef WIFIMANAGER_USE_ASYNC_WEBSERVER
-  _server->on("/",       HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleRoot(r);   });
-  _server->on("/scan",   HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleScan(r);   });
-  _server->on("/list",   HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleList(r);   });
-  _server->on("/delete", HTTP_ANY,  [this](AsyncWebServerRequest* r){ _handleDelete(r); });
-  _server->on("/save",   HTTP_POST, [this](AsyncWebServerRequest* r){ _handleSave(r);   });
-  _server->onNotFound(              [this](AsyncWebServerRequest* r){ _handleRoot(r);   });
+    _server->on("/",       HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleRoot(r);   });
+    _server->on("/scan",   HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleScan(r);   });
+    _server->on("/list",   HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleList(r);   });
+    _server->on("/delete", HTTP_ANY,  [this](AsyncWebServerRequest* r){ _handleDelete(r); });
+    _server->on("/save",   HTTP_POST, [this](AsyncWebServerRequest* r){ _handleSave(r);   });
+    _server->onNotFound(              [this](AsyncWebServerRequest* r){ _handleRoot(r);   });
 #else
-  _server->on("/",       std::bind(&WiFiManager::_handleRoot,   this));
-  _server->on("/scan",   std::bind(&WiFiManager::_handleScan,   this));
-  _server->on("/list",   std::bind(&WiFiManager::_handleList,   this));
-  _server->on("/delete", std::bind(&WiFiManager::_handleDelete, this));
-  _server->on("/save",   HTTP_POST, std::bind(&WiFiManager::_handleSave, this));
-  _server->onNotFound([this](){ _handleRoot(); });
+    _server->on("/",       std::bind(&WiFiManager::_handleRoot,   this));
+    _server->on("/scan",   std::bind(&WiFiManager::_handleScan,   this));
+    _server->on("/list",   std::bind(&WiFiManager::_handleList,   this));
+    _server->on("/delete", std::bind(&WiFiManager::_handleDelete, this));
+    _server->on("/save",   HTTP_POST, std::bind(&WiFiManager::_handleSave, this));
+    _server->onNotFound([this](){ _handleRoot(); });
 #endif
+    _routesRegistered = true;
+  }
 
   _server->begin();
 }
