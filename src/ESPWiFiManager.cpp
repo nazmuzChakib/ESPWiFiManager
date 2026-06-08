@@ -1,52 +1,110 @@
 /**
  * @file ESPWiFiManager.cpp
- * @brief Implementation of WiFiManager.
+ * @brief Implementation of WiFiManager v5.
  *
- * ESPWiFiManagerConfig.h is pulled in transitively through ESPWiFiManager.h,
- * so WIFIMANAGER_USE_ASYNC_WEBSERVER is always in scope here — no manual
- * re-inclusion required.
+ * Key improvements over v4:
+ *  - Unified Preferences (NVS) storage on both ESP32 and ESP8266
+ *  - Auto AP Fallback with dual-mode AP+STA
+ *  - Background scan while portal is active — auto-reconnect to STA
+ *  - Exponential backoff reconnection
+ *  - Static IP configuration (persisted in NVS)
+ *  - Event callbacks (onStateChange, onConnected, onDisconnected, etc.)
+ *  - Dynamic logging engine (level, stream, custom handler)
+ *  - Low-level tuning: Tx power, sleep mode, AP channel/hidden/clients
  */
 
 #include "ESPWiFiManager.h"
+#include <stdarg.h>   // for va_list in _log()
 
 // ── Constructor ───────────────────────────────────────────────────────────
 WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password)
   : _ap_ssid(ap_ssid), _ap_password(ap_password) {}
 
 // ══════════════════════════════════════════════════════════════════════════
-//  PERSISTENT STORAGE
+//  LOGGING ENGINE
+// ══════════════════════════════════════════════════════════════════════════
+
+void WiFiManager::_log(WiFiLogLevel level, const char* fmt, ...) const {
+  if (level > _logLevel) return;
+
+  char buf[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+
+  if (_logHandler) {
+    _logHandler(level, buf);
+    return;
+  }
+  if (_logStream) {
+    _logStream->println(buf);
+  }
+}
+
+void WiFiManager::setLogLevel(WiFiLogLevel level) { _logLevel = level; }
+
+void WiFiManager::setLogStream(Stream& stream) { _logStream = &stream; }
+
+void WiFiManager::setLogHandler(std::function<void(WiFiLogLevel, const char*)> handler) {
+  _logHandler = handler;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  PERSISTENT STORAGE  (unified Preferences / NVS on both platforms)
 // ══════════════════════════════════════════════════════════════════════════
 
 String WiFiManager::_loadData() const {
-#if defined(ESP32)
   _prefs.begin(NVS_NAMESPACE, /*readOnly=*/true);
-  String json = _prefs.getString(NVS_KEY_MULTI, "[]");
+  String json = _prefs.getString(NVS_KEY_CREDS, "[]");
   _prefs.end();
   return json;
-#elif defined(ESP8266)
-  EEPROM.begin(EEPROM_SIZE);
-  int len = (int)EEPROM.read(0) | ((int)EEPROM.read(1) << 8);
-  if (len <= 0 || len > EEPROM_SIZE - 2 || len == 0xFFFF) return "[]";
-  String json;
-  json.reserve(len);
-  for (int i = 0; i < len; i++) json += (char)EEPROM.read(2 + i);
-  return json;
-#endif
 }
 
 void WiFiManager::_saveData(const String& js) {
-#if defined(ESP32)
   _prefs.begin(NVS_NAMESPACE, /*readOnly=*/false);
-  _prefs.putString(NVS_KEY_MULTI, js);
+  _prefs.putString(NVS_KEY_CREDS, js);
   _prefs.end();
-#elif defined(ESP8266)
-  EEPROM.begin(EEPROM_SIZE);
-  int len = js.length();
-  EEPROM.write(0, (uint8_t)(len & 0xFF));
-  EEPROM.write(1, (uint8_t)((len >> 8) & 0xFF));
-  for (int i = 0; i < len; i++) EEPROM.write(2 + i, (uint8_t)js[i]);
-  EEPROM.commit();
-#endif
+}
+
+void WiFiManager::_loadStaticIP() {
+  _prefs.begin(NVS_NAMESPACE, true);
+  String json = _prefs.getString(NVS_KEY_STATIC_IP, "");
+  _prefs.end();
+  if (json.isEmpty()) return;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) return;
+
+  if (doc["enabled"] | false) {
+    _staticIP.enabled = true;
+    _staticIP.ip.fromString(doc["ip"] | "0.0.0.0");
+    _staticIP.gateway.fromString(doc["gw"] | "0.0.0.0");
+    _staticIP.subnet.fromString(doc["sn"] | "255.255.255.0");
+    _staticIP.dns1.fromString(doc["d1"] | "0.0.0.0");
+    _staticIP.dns2.fromString(doc["d2"] | "0.0.0.0");
+  }
+}
+
+void WiFiManager::_saveStaticIP() {
+  JsonDocument doc;
+  doc["enabled"] = _staticIP.enabled;
+  doc["ip"]      = _staticIP.ip.toString();
+  doc["gw"]      = _staticIP.gateway.toString();
+  doc["sn"]      = _staticIP.subnet.toString();
+  doc["d1"]      = _staticIP.dns1.toString();
+  doc["d2"]      = _staticIP.dns2.toString();
+  String json; serializeJson(doc, json);
+  _prefs.begin(NVS_NAMESPACE, false);
+  _prefs.putString(NVS_KEY_STATIC_IP, json);
+  _prefs.end();
+}
+
+void WiFiManager::_applyStaticIP() {
+  if (!_staticIP.enabled) return;
+  WiFi.config(_staticIP.ip, _staticIP.gateway, _staticIP.subnet,
+               _staticIP.dns1, _staticIP.dns2);
+  _log(WIFI_LOG_INFO, "[WiFiManager] Static IP applied: %s", _staticIP.ip.toString().c_str());
 }
 
 String WiFiManager::getCredentialsJson() const { return _loadData(); }
@@ -66,23 +124,25 @@ void WiFiManager::addCredential(const char* ssid, const char* password) {
     if (strcmp(obj["ssid"] | "", ssid) == 0) {
       obj["password"] = password;
       String out; serializeJson(arr, out); _saveData(out);
-      Serial.printf("[WiFiManager] Updated credential: %s\n", ssid);
+      _log(WIFI_LOG_INFO, "[WiFiManager] Updated credential: %s", ssid);
+      if (_cbCredsChanged) _cbCredsChanged();
       return;
     }
   }
 
   // Enforce FIFO capacity limit
   if (arr.size() >= MAX_CREDS) {
-    Serial.printf("[WiFiManager] Limit (%u) reached, removing oldest: %s\n",
-                  (unsigned)MAX_CREDS, arr[0]["ssid"].as<const char*>());
+    _log(WIFI_LOG_INFO, "[WiFiManager] Limit (%u) reached, removing oldest: %s",
+         (unsigned)MAX_CREDS, arr[0]["ssid"].as<const char*>());
     arr.remove(0);
   }
 
-  JsonObject o = arr.add<JsonObject>();
+  JsonObject o  = arr.add<JsonObject>();
   o["ssid"]     = ssid;
   o["password"] = password;
   String out; serializeJson(arr, out); _saveData(out);
-  Serial.printf("[WiFiManager] Added credential: %s\n", ssid);
+  _log(WIFI_LOG_INFO, "[WiFiManager] Added credential: %s", ssid);
+  if (_cbCredsChanged) _cbCredsChanged();
 }
 
 void WiFiManager::deleteCredential(const char* ssid) {
@@ -95,38 +155,123 @@ void WiFiManager::deleteCredential(const char* ssid) {
     if (strcmp(arr[i]["ssid"] | "", ssid) == 0) {
       arr.remove(i);
       String out; serializeJson(arr, out); _saveData(out);
-      Serial.printf("[WiFiManager] Deleted credential: %s\n", ssid);
+      _log(WIFI_LOG_INFO, "[WiFiManager] Deleted credential: %s", ssid);
+      if (_cbCredsChanged) _cbCredsChanged();
       return;
     }
   }
-  Serial.printf("[WiFiManager] Credential not found: %s\n", ssid);
+  _log(WIFI_LOG_INFO, "[WiFiManager] Credential not found: %s", ssid);
 }
 
 void WiFiManager::clearCredentials() {
-#if defined(ESP32)
   _prefs.begin(NVS_NAMESPACE, false);
-  _prefs.clear();
+  _prefs.remove(NVS_KEY_CREDS);
   _prefs.end();
-#elif defined(ESP8266)
-  EEPROM.begin(EEPROM_SIZE);
-  // Write a zero-length header — faster than wiping the whole 1 KB
-  EEPROM.write(0, 0);
-  EEPROM.write(1, 0);
-  EEPROM.commit();
-#endif
-  Serial.println(F("[WiFiManager] All credentials cleared."));
+  _log(WIFI_LOG_INFO, "[WiFiManager] All credentials cleared.");
+  if (_cbCredsChanged) _cbCredsChanged();
 }
 
 void WiFiManager::listCredentialsToSerial() const {
   String json = _loadData();
   JsonDocument doc;
   if (deserializeJson(doc, json) || doc.as<JsonArray>().size() == 0) {
-    Serial.println(F("[WiFiManager] No credentials stored."));
+    _log(WIFI_LOG_INFO, "[WiFiManager] No credentials stored.");
     return;
   }
-  Serial.println(F("[WiFiManager] Stored networks:"));
-  for (JsonObject obj : doc.as<JsonArray>())
-    Serial.printf("  - %s\n", obj["ssid"].as<const char*>());
+  _log(WIFI_LOG_INFO, "[WiFiManager] Stored networks:");
+  for (JsonObject obj : doc.as<JsonArray>()) {
+    // Print each SSID individually since _log uses a fixed buffer
+    char buf[80];
+    snprintf(buf, sizeof(buf), "  - %s", obj["ssid"].as<const char*>());
+    _log(WIFI_LOG_INFO, buf);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  STATIC IP
+// ══════════════════════════════════════════════════════════════════════════
+
+void WiFiManager::setStaticIP(IPAddress ip, IPAddress gateway, IPAddress subnet,
+                               IPAddress dns1, IPAddress dns2) {
+  _staticIP = { ip, gateway, subnet, dns1, dns2, true };
+  _saveStaticIP();
+  _log(WIFI_LOG_INFO, "[WiFiManager] Static IP set: %s", ip.toString().c_str());
+}
+
+void WiFiManager::clearStaticIP() {
+  _staticIP = {};
+  _saveStaticIP();
+  _log(WIFI_LOG_INFO, "[WiFiManager] Static IP cleared (DHCP).");
+}
+
+bool WiFiManager::hasStaticIP() const { return _staticIP.enabled; }
+
+// ══════════════════════════════════════════════════════════════════════════
+//  STATE HELPERS & QUERY
+// ══════════════════════════════════════════════════════════════════════════
+
+void WiFiManager::_setState(WiFiState newState) {
+  if (newState == _currentState) return;
+  WiFiState old = _currentState;
+  _currentState  = newState;
+  if (_cbStateChange) _cbStateChange(old, newState);
+}
+
+WiFiState WiFiManager::getState()    const { return _currentState; }
+bool      WiFiManager::isConnected() const { return _currentState == WIFI_STATE_CONNECTED; }
+IPAddress WiFiManager::getLocalIP()  const { return WiFi.localIP(); }
+IPAddress WiFiManager::getAPIP()     const { return WiFi.softAPIP(); }
+
+// ══════════════════════════════════════════════════════════════════════════
+//  CALLBACK REGISTRATION
+// ══════════════════════════════════════════════════════════════════════════
+
+void WiFiManager::onStateChange(std::function<void(WiFiState, WiFiState)> cb)     { _cbStateChange   = cb; }
+void WiFiManager::onStationConnected(std::function<void(const String&, IPAddress)> cb) { _cbConnected = cb; }
+void WiFiManager::onStationDisconnected(std::function<void(int)> cb)               { _cbDisconnected  = cb; }
+void WiFiManager::onAPModeStarted(std::function<void(const String&, IPAddress)> cb){ _cbAPStarted     = cb; }
+void WiFiManager::onAPModeStopped(std::function<void()> cb)                        { _cbAPStopped     = cb; }
+void WiFiManager::onCredentialsChanged(std::function<void()> cb)                   { _cbCredsChanged  = cb; }
+
+// ══════════════════════════════════════════════════════════════════════════
+//  BEHAVIOUR TUNING
+// ══════════════════════════════════════════════════════════════════════════
+
+void WiFiManager::setAutoAPFallback(bool enable, ESP_WebServer* server) {
+  _autoAPEnabled = enable;
+  _autoAPServer  = server;
+}
+
+void WiFiManager::setBackgroundReconnect(bool enable) {
+  _bgReconnectEnabled = enable;
+}
+
+void WiFiManager::setAPTimeout(uint32_t timeoutMs) {
+  _apTimeoutMs = timeoutMs;
+}
+
+void WiFiManager::setAPConfig(uint8_t channel, bool hidden, uint8_t maxClients) {
+  _apChannel    = channel;
+  _apHidden     = hidden;
+  _apMaxClients = maxClients;
+}
+
+void WiFiManager::setTxPower(float dbm) {
+#if defined(ESP32)
+  WiFi.setTxPower(static_cast<wifi_power_t>((int)(dbm * 4)));
+#elif defined(ESP8266)
+  WiFi.setOutputPower(dbm);
+#endif
+  _log(WIFI_LOG_DEBUG, "[WiFiManager] Tx power set to %.1f dBm", dbm);
+}
+
+void WiFiManager::setWiFiSleep(bool enable) {
+#if defined(ESP32)
+  WiFi.setSleep(enable);
+#elif defined(ESP8266)
+  WiFi.setSleepMode(enable ? WIFI_MODEM_SLEEP : WIFI_NONE_SLEEP);
+#endif
+  _log(WIFI_LOG_DEBUG, "[WiFiManager] WiFi sleep: %s", enable ? "enabled" : "disabled");
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -134,27 +279,37 @@ void WiFiManager::listCredentialsToSerial() const {
 // ══════════════════════════════════════════════════════════════════════════
 
 void WiFiManager::begin() {
+  _loadStaticIP();   // restore any persisted static IP from NVS
   _setupEventHandlers();
   _printHelp();
+  _log(WIFI_LOG_INFO, "[WiFiManager] v5 ready. AutoAP=%s BackgroundReconnect=%s",
+       _autoAPEnabled ? "on" : "off", _bgReconnectEnabled ? "on" : "off");
+
+  // Auto-kick the first connection attempt
+  connectToWiFi();
 }
 
 void WiFiManager::_setupEventHandlers() {
 #if defined(ESP32)
-  WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t /*info*/) {
-    if (_apModeActive) return; // Never reconnect while serving the captive portal
-    Serial.println(F("\n[WiFiManager] Disconnected (hardware event)."));
-    _currentState        = WIFI_STATE_FAILED;
+  WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (_apModeActive) return;
+    _log(WIFI_LOG_INFO, "[WiFiManager] Disconnected (event). Reason: %d",
+         (int)info.wifi_sta_disconnected.reason);
+    _lastDisconnectReason = (int)info.wifi_sta_disconnected.reason;
+    if (_cbDisconnected) _cbDisconnected(_lastDisconnectReason);
     _disconnectTriggered = true;
+    _setState(WIFI_STATE_FAILED);
   }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
 #elif defined(ESP8266)
-  // Handler stored in member — a local variable would unsubscribe on destruction
   _disconnectHandler = WiFi.onStationModeDisconnected(
-    [this](const WiFiEventStationModeDisconnected& /*e*/) {
+    [this](const WiFiEventStationModeDisconnected& e) {
       if (_apModeActive) return;
-      Serial.println(F("\n[WiFiManager] Disconnected (hardware event)."));
-      _currentState        = WIFI_STATE_FAILED;
+      _log(WIFI_LOG_INFO, "[WiFiManager] Disconnected (event). Reason: %d", (int)e.reason);
+      _lastDisconnectReason = (int)e.reason;
+      if (_cbDisconnected) _cbDisconnected(_lastDisconnectReason);
       _disconnectTriggered = true;
+      _setState(WIFI_STATE_FAILED);
     });
 #endif
 }
@@ -164,36 +319,34 @@ void WiFiManager::_setupEventHandlers() {
 // ══════════════════════════════════════════════════════════════════════════
 
 void WiFiManager::connectToWiFi() {
-  Serial.println(F("[WiFiManager] Scanning for known networks..."));
+  _log(WIFI_LOG_INFO, "[WiFiManager] Starting async WiFi scan...");
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect(false); // false = keep the radio on (avoids modem off on ESP32)
+  WiFi.disconnect(false);
   delay(50);
   WiFi.scanNetworks(/*async=*/true, /*showHidden=*/true);
   _scanStartTime = millis();
-  _currentState  = WIFI_STATE_SCANNING;
+  _setState(WIFI_STATE_SCANNING);
 }
 
 void WiFiManager::_checkScanStatus() {
   int n = WiFi.scanComplete();
 
-  // Still running
   if (n == WIFI_SCAN_RUNNING) {
-    if (millis() - _scanStartTime >= SCAN_TIMEOUT_MS) {
-      Serial.println(F("[WiFiManager] Scan timed out. Falling back to AP mode."));
+    if (millis() - _scanStartTime >= SCAN_TIMEOUT) {
+      _log(WIFI_LOG_ERROR, "[WiFiManager] Scan timed out. Falling back.");
       WiFi.scanDelete();
-      _currentState = WIFI_STATE_FAILED;
+      _handleAllFailed();
     }
     return;
   }
 
-  // Hardware error
   if (n == WIFI_SCAN_FAILED) {
-    Serial.println(F("[WiFiManager] Scan failed. Falling back to AP mode."));
-    _currentState = WIFI_STATE_FAILED;
+    _log(WIFI_LOG_ERROR, "[WiFiManager] Scan failed. Falling back.");
+    _handleAllFailed();
     return;
   }
 
-  // Scan complete (n >= 0) — match against saved credentials
+  // n >= 0 — scan complete, match against saved credentials
   _matchedSSIDs.clear();
   _matchedPasses.clear();
 
@@ -204,7 +357,6 @@ void WiFiManager::_checkScanStatus() {
     JsonArray arr = doc.as<JsonArray>();
 
     if (n > 0) {
-      // Collect matches and deduplicate, keeping the best RSSI for each SSID
       struct Match { String ssid, pass; int32_t rssi; };
       std::vector<Match> found;
 
@@ -218,27 +370,27 @@ void WiFiManager::_checkScanStatus() {
             for (auto& f : found) {
               if (f.ssid == scanned) {
                 exists = true;
-                if (rssi > f.rssi) f.rssi = rssi; // keep strongest RSSI
+                if (rssi > f.rssi) f.rssi = rssi;
                 break;
               }
             }
             if (!exists) found.push_back({scanned, cred["password"].as<String>(), rssi});
-            break; // stop inner credential loop once SSID is matched
+            break;
           }
         }
       }
 
-      // Sort strongest signal first
       std::sort(found.begin(), found.end(),
                 [](const Match& a, const Match& b){ return a.rssi > b.rssi; });
 
       for (const auto& f : found) {
         _matchedSSIDs.push_back(f.ssid);
         _matchedPasses.push_back(f.pass);
-        Serial.printf("[WiFiManager] Matched: %s (RSSI: %d)\n", f.ssid.c_str(), f.rssi);
+        _log(WIFI_LOG_INFO, "[WiFiManager] Matched: %s (RSSI: %d dBm)",
+             f.ssid.c_str(), f.rssi);
       }
     } else {
-      // No visible networks — try all saved credentials sequentially as fallback
+      // No visible networks — try all saved credentials as fallback
       for (JsonObject cred : arr) {
         _matchedSSIDs.push_back(cred["ssid"].as<String>());
         _matchedPasses.push_back(cred["password"].as<String>());
@@ -249,8 +401,8 @@ void WiFiManager::_checkScanStatus() {
   WiFi.scanDelete();
 
   if (_matchedSSIDs.empty()) {
-    Serial.println(F("[WiFiManager] No known networks found."));
-    _currentState = WIFI_STATE_FAILED;
+    _log(WIFI_LOG_INFO, "[WiFiManager] No known networks found.");
+    _handleAllFailed();
     return;
   }
 
@@ -261,17 +413,19 @@ void WiFiManager::_checkScanStatus() {
 
 void WiFiManager::_startNextConnection() {
   if (_currentNetworkIndex >= (int)_matchedSSIDs.size()) {
-    Serial.println(F("[WiFiManager] All networks exhausted. Connection failed."));
-    _currentState = WIFI_STATE_FAILED;
+    _log(WIFI_LOG_INFO, "[WiFiManager] All networks exhausted.");
     _isConnecting = false;
+    _handleAllFailed();
     return;
   }
   const String& ssid = _matchedSSIDs[_currentNetworkIndex];
   const String& pass = _matchedPasses[_currentNetworkIndex];
-  Serial.printf("[WiFiManager] Trying: %s\n", ssid.c_str());
+  _log(WIFI_LOG_INFO, "[WiFiManager] Trying: %s (%d/%d)",
+       ssid.c_str(), _currentNetworkIndex + 1, (int)_matchedSSIDs.size());
   WiFi.mode(WIFI_STA);
+  _applyStaticIP();
   WiFi.begin(ssid.c_str(), pass.c_str());
-  _currentState     = WIFI_STATE_CONNECTING;
+  _setState(WIFI_STATE_CONNECTING);
   _startAttemptTime = millis();
 }
 
@@ -279,48 +433,177 @@ void WiFiManager::_checkConnectionStatus() {
   if (!_isConnecting) return;
 
   if (WiFi.status() == WL_CONNECTED) {
-    _currentState = WIFI_STATE_CONNECTED;
+    _setState(WIFI_STATE_CONNECTED);
     _isConnecting = false;
-    Serial.println(F("\n[WiFiManager] Connected!"));
-    Serial.printf("[WiFiManager] IP: %s\n", WiFi.localIP().toString().c_str());
+    _resetBackoff();
+    String ssid = WiFi.SSID();
+    IPAddress ip = WiFi.localIP();
+    _log(WIFI_LOG_INFO, "[WiFiManager] Connected! SSID: %s  IP: %s",
+         ssid.c_str(), ip.toString().c_str());
+    if (_cbConnected) _cbConnected(ssid, ip);
     return;
   }
 
-  if (millis() - _startAttemptTime >= CONNECTION_TIMEOUT_MS) {
-    Serial.printf("\n[WiFiManager] Timeout for '%s'. Trying next...\n",
-                  _matchedSSIDs[_currentNetworkIndex].c_str());
+  if (millis() - _startAttemptTime >= CONNECTION_TIMEOUT) {
+    _log(WIFI_LOG_INFO, "[WiFiManager] Timeout for '%s'. Trying next...",
+         _matchedSSIDs[_currentNetworkIndex].c_str());
     _currentNetworkIndex++;
     _startNextConnection();
   }
 }
 
-WiFiState WiFiManager::getState() const { return _currentState; }
+// ── Called whenever we have exhausted all networks ───────────────────────
+void WiFiManager::_handleAllFailed() {
+  _setState(WIFI_STATE_FAILED);
+
+  // Auto AP fallback if enabled and a server is registered
+  if (_autoAPEnabled && _autoAPServer) {
+    _log(WIFI_LOG_INFO, "[WiFiManager] Auto AP Fallback: starting captive portal.");
+    startAPMode(*_autoAPServer);
+    return;
+  }
+
+  // Otherwise schedule a backoff reconnect
+  if (_bgReconnectEnabled) {
+    _scheduleReconnect();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  EXPONENTIAL BACKOFF RECONNECTION
+// ══════════════════════════════════════════════════════════════════════════
+
+void WiFiManager::_resetBackoff() {
+  _reconnectInterval  = RECONNECT_BASE;
+  _reconnectScheduled = false;
+}
+
+void WiFiManager::_scheduleReconnect() {
+  if (_reconnectScheduled) return;
+  _reconnectScheduled = true;
+  _nextReconnectAt    = millis() + _reconnectInterval;
+  _log(WIFI_LOG_INFO, "[WiFiManager] Reconnect scheduled in %lu ms (backoff: %lu ms).",
+       _reconnectInterval, _reconnectInterval);
+
+  // Double the interval for next time, clamped to max
+  _reconnectInterval = min(_reconnectInterval * 2, (unsigned long)RECONNECT_MAX);
+}
+
+void WiFiManager::_checkReconnect() {
+  if (!_reconnectScheduled || _apModeActive) return;
+  if (millis() >= _nextReconnectAt) {
+    _reconnectScheduled = false;
+    _disconnectTriggered = false;
+    _log(WIFI_LOG_INFO, "[WiFiManager] Backoff elapsed. Reconnecting...");
+    connectToWiFi();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  AP TIMEOUT & BACKGROUND SCAN
+// ══════════════════════════════════════════════════════════════════════════
+
+void WiFiManager::_checkAPTimeout() {
+  if (!_apModeActive || _apTimeoutMs == 0) return;
+  if (millis() - _apStartedAt >= _apTimeoutMs) {
+    _log(WIFI_LOG_INFO, "[WiFiManager] AP timeout reached. Reverting to STA scan.");
+    stopAPMode();
+    connectToWiFi();
+  }
+}
+
+void WiFiManager::_startBGScan() {
+  _log(WIFI_LOG_DEBUG, "[WiFiManager] Background scan started (AP+STA dual mode).");
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.scanNetworks(/*async=*/true, /*showHidden=*/true);
+  _bgScanPending = true;
+}
+
+void WiFiManager::_checkBGScan() {
+  if (!_apModeActive) return;
+
+  // Schedule next background scan
+  if (!_bgScanPending && millis() >= _bgScanAt) {
+    _startBGScan();
+    return;
+  }
+
+  if (!_bgScanPending) return;
+
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) return;
+
+  _bgScanPending = false;
+  _bgScanAt      = millis() + BG_SCAN_INTERVAL;
+
+  if (n <= 0) {
+    _log(WIFI_LOG_DEBUG, "[WiFiManager] Background scan: no networks found.");
+    return;
+  }
+
+  _log(WIFI_LOG_DEBUG, "[WiFiManager] Background scan complete: %d network(s).", n);
+
+  // Check if any saved credentials match
+  String json = _loadData();
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) { WiFi.scanDelete(); return; }
+
+  JsonArray arr = doc.as<JsonArray>();
+  for (int i = 0; i < n; ++i) {
+    String scanned = WiFi.SSID(i);
+    for (JsonObject cred : arr) {
+      if (scanned == cred["ssid"].as<String>()) {
+        _log(WIFI_LOG_INFO, "[WiFiManager] Known network '%s' detected. Auto-recovering!",
+             scanned.c_str());
+        WiFi.scanDelete();
+        // Tear down portal, connect to STA
+        stopAPMode();
+        connectToWiFi();
+        return;
+      }
+    }
+  }
+  WiFi.scanDelete();
+}
 
 // ══════════════════════════════════════════════════════════════════════════
 //  MAIN PROCESS LOOP
 // ══════════════════════════════════════════════════════════════════════════
 
 void WiFiManager::process() {
-  // Non-blocking scheduled restart (avoids delay() inside web handlers)
+  // 1. Pending restart (non-blocking, set by /save handler)
   if (_restartPending && millis() >= _restartAt) {
     ESP.restart();
   }
 
-  // Reconnect after a drop — but not while the captive portal is active
+  // 2. Disconnect event from hardware ISR — schedule a reconnect
   if (_disconnectTriggered && !_apModeActive) {
     _disconnectTriggered = false;
-    Serial.println(F("[WiFiManager] Reconnecting after drop..."));
-    connectToWiFi();
+    if (_bgReconnectEnabled) {
+      _scheduleReconnect();
+    }
   }
 
-  // State machine tick
-  if      (_currentState == WIFI_STATE_SCANNING)   _checkScanStatus();
-  else if (_currentState == WIFI_STATE_CONNECTING)  _checkConnectionStatus();
+  // 3. State machine tick
+  switch (_currentState) {
+    case WIFI_STATE_SCANNING:   _checkScanStatus();       break;
+    case WIFI_STATE_CONNECTING: _checkConnectionStatus(); break;
+    default:                                               break;
+  }
 
-  // DNS redirect only meaningful when the captive portal is running
-  if (_apModeActive) _dnsServer.processNextRequest();
+  // 4. Background reconnect timer
+  if (_currentState == WIFI_STATE_FAILED || _reconnectScheduled) {
+    _checkReconnect();
+  }
 
-  // Standard WebServer needs manual client pumping; AsyncWebServer handles itself
+  // 5. Captive portal DNS + AP lifecycle
+  if (_apModeActive) {
+    _dnsServer.processNextRequest();
+    _checkAPTimeout();
+    _checkBGScan();
+  }
+
+  // 6. Standard WebServer client pump (AsyncWebServer is self-driven)
 #ifndef WIFIMANAGER_USE_ASYNC_WEBSERVER
   if (_server) _server->handleClient();
 #endif
@@ -333,16 +616,23 @@ void WiFiManager::process() {
 void WiFiManager::setServer(ESP_WebServer* server) { _server = server; }
 
 void WiFiManager::startAPMode(ESP_WebServer& server) {
+  if (_apModeActive) return;  // Guard against duplicate calls
+
   _server       = &server;
   _apModeActive = true;
-  _currentState = WIFI_STATE_AP_MODE;
+  _apStartedAt  = millis();
+  _bgScanAt     = millis() + BG_SCAN_INTERVAL;  // first bg scan after interval
+  _bgScanPending = false;
 
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(_ap_ssid, _ap_password);
-  Serial.printf("[WiFiManager] AP started  SSID: %-20s  IP: %s\n",
-                _ap_ssid, WiFi.softAPIP().toString().c_str());
+  WiFi.mode(WIFI_AP_STA);  // dual mode — keeps STA radio alive for bg scans
+  WiFi.softAP(_ap_ssid, _ap_password, _apChannel, _apHidden, _apMaxClients);
+  IPAddress apIP = WiFi.softAPIP();
+  _log(WIFI_LOG_INFO, "[WiFiManager] AP started  SSID: %-20s  IP: %s",
+       _ap_ssid, apIP.toString().c_str());
 
-  _dnsServer.start(53, "*", WiFi.softAPIP());
+  _dnsServer.start(53, "*", apIP);
+
+  _setState(WIFI_STATE_AP_MODE);
 
 #ifdef WIFIMANAGER_USE_ASYNC_WEBSERVER
   _server->on("/",       HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleRoot(r);   });
@@ -361,6 +651,19 @@ void WiFiManager::startAPMode(ESP_WebServer& server) {
 #endif
 
   _server->begin();
+  if (_cbAPStarted) _cbAPStarted(String(_ap_ssid), apIP);
+}
+
+void WiFiManager::stopAPMode() {
+  if (!_apModeActive) return;
+  _dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  _apModeActive  = false;
+  _bgScanPending = false;
+  _log(WIFI_LOG_INFO, "[WiFiManager] AP stopped.");
+  _setState(WIFI_STATE_IDLE);
+  if (_cbAPStopped) _cbAPStopped();
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -399,11 +702,7 @@ void WiFiManager::_handleRoot(AsyncWebServerRequest* req) {
 
 void WiFiManager::_handleScan(AsyncWebServerRequest* req) {
   int n = WiFi.scanNetworks(/*async=*/false, /*showHidden=*/true);
-  if (n <= 0) {
-    WiFi.scanDelete();
-    req->send(200, "application/json", "[]");
-    return;
-  }
+  if (n <= 0) { WiFi.scanDelete(); req->send(200, "application/json", "[]"); return; }
   JsonDocument doc;
   for (int i = 0; i < n; ++i) {
     JsonObject obj    = doc.add<JsonObject>();
@@ -421,7 +720,6 @@ void WiFiManager::_handleScan(AsyncWebServerRequest* req) {
 }
 
 void WiFiManager::_handleSave(AsyncWebServerRequest* req) {
-  // Accept params from both POST body and query string
   auto param = [&](const char* name) -> String {
     if (req->hasParam(name, true)) return req->getParam(name, true)->value();
     if (req->hasParam(name))       return req->getParam(name)->value();
@@ -431,9 +729,8 @@ void WiFiManager::_handleSave(AsyncWebServerRequest* req) {
   if (ssid.isEmpty()) { req->send(400, "text/plain", "SSID cannot be empty"); return; }
   addCredential(ssid.c_str(), param("password").c_str());
   req->send(200, "text/html", "<p>Saved! Rebooting...</p>");
-  // Non-blocking restart — avoids calling delay() inside an async callback
   _restartPending = true;
-  _restartAt      = millis() + RESTART_DELAY_MS;
+  _restartAt      = millis() + RESTART_DELAY;
 }
 
 void WiFiManager::_handleList(AsyncWebServerRequest* req) {
@@ -470,11 +767,7 @@ void WiFiManager::_handleRoot() {
 
 void WiFiManager::_handleScan() {
   int n = WiFi.scanNetworks(/*async=*/false, /*showHidden=*/true);
-  if (n <= 0) {
-    WiFi.scanDelete();
-    _server->send(200, "application/json", "[]");
-    return;
-  }
+  if (n <= 0) { WiFi.scanDelete(); _server->send(200, "application/json", "[]"); return; }
   JsonDocument doc;
   for (int i = 0; i < n; ++i) {
     JsonObject obj    = doc.add<JsonObject>();
@@ -498,7 +791,7 @@ void WiFiManager::_handleSave() {
   addCredential(ssid.c_str(), password.c_str());
   _server->send(200, "text/html", "<p>Saved! Rebooting...</p>");
   _restartPending = true;
-  _restartAt      = millis() + RESTART_DELAY_MS;
+  _restartAt      = millis() + RESTART_DELAY;
 }
 
 void WiFiManager::_handleList() {
@@ -555,17 +848,53 @@ void WiFiManager::executeCommand(String cmdLine, Stream& io) {
 
   String cmd = p[0]; cmd.toUpperCase();
 
-  if      (cmd == "ADD"    && n >= 2) addCredential(p[1].c_str(), n >= 3 ? p[2].c_str() : "");
-  else if ((cmd == "DEL"   || cmd == "DELETE") && n >= 2) deleteCredential(p[1].c_str());
-  else if (cmd == "CLEAR")            clearCredentials();
-  else if (cmd == "LIST")             listCredentialsToSerial();
-  else if (cmd == "STATUS") {
-    io.printf("[WiFiManager] State: %d | IP: %s\n",
-              _currentState, WiFi.localIP().toString().c_str());
+  if (cmd == "ADD" && n >= 2) {
+    addCredential(p[1].c_str(), n >= 3 ? p[2].c_str() : "");
   }
-  else _printHelp();
+  else if ((cmd == "DEL" || cmd == "DELETE") && n >= 2) {
+    deleteCredential(p[1].c_str());
+  }
+  else if (cmd == "CLEAR") {
+    clearCredentials();
+  }
+  else if (cmd == "LIST") {
+    listCredentialsToSerial();
+  }
+  else if (cmd == "STATUS") {
+    io.printf("[WiFiManager] State: %d | STA IP: %s | AP IP: %s\n",
+              (int)_currentState,
+              WiFi.localIP().toString().c_str(),
+              WiFi.softAPIP().toString().c_str());
+  }
+  else if (cmd == "RECONNECT") {
+    _log(WIFI_LOG_INFO, "[WiFiManager] Manual reconnect triggered.");
+    stopAPMode();
+    connectToWiFi();
+  }
+  else if (cmd == "APSTART") {
+    if (_autoAPServer) startAPMode(*_autoAPServer);
+    else io.println("[WiFiManager] No server registered. Use setAutoAPFallback(true, &server) first.");
+  }
+  else if (cmd == "APSTOP") {
+    stopAPMode();
+  }
+  else if (cmd == "LOGLEVEL" && n >= 2) {
+    int lvl = p[1].toInt();
+    if (lvl >= 0 && lvl <= 3) {
+      setLogLevel(static_cast<WiFiLogLevel>(lvl));
+      io.printf("[WiFiManager] Log level set to %d\n", lvl);
+    } else {
+      io.println("[WiFiManager] Log level must be 0-3.");
+    }
+  }
+  else {
+    _printHelp();
+  }
 }
 
 void WiFiManager::_printHelp() const {
-  Serial.println(F("[WiFiManager] Commands: ADD \"SSID\" \"PASS\"  |  DEL \"SSID\"  |  LIST  |  CLEAR  |  STATUS"));
+  _log(WIFI_LOG_INFO,
+    "[WiFiManager] Commands: "
+    "ADD \"SSID\" \"PASS\" | DEL \"SSID\" | LIST | CLEAR | STATUS | "
+    "RECONNECT | APSTART | APSTOP | LOGLEVEL <0-3>");
 }
