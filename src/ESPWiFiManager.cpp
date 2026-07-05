@@ -18,7 +18,19 @@
 
 // ── Constructor ───────────────────────────────────────────────────────────
 WiFiManager::WiFiManager(const char* ap_ssid, const char* ap_password)
-  : _ap_ssid(ap_ssid), _ap_password(ap_password) {}
+  : _ap_ssid(ap_ssid), _ap_password(ap_password) {
+#if defined(ESP32)
+  _wifiDisconnectEventId = 0;
+#endif
+}
+
+WiFiManager::~WiFiManager() {
+#if defined(ESP32)
+  if (_wifiDisconnectEventId != 0) {
+    WiFi.removeEvent(_wifiDisconnectEventId);
+  }
+#endif
+}
 
 // ══════════════════════════════════════════════════════════════════════════
 //  LOGGING ENGINE
@@ -113,6 +125,26 @@ String WiFiManager::getCredentialsJson() const { return _loadData(); }
 //  CREDENTIAL MANAGEMENT
 // ══════════════════════════════════════════════════════════════════════════
 
+void WiFiManager::_updateCredCache() {
+  _cachedCredsCount = 0;
+  memset(_cachedSSIDs, 0, sizeof(_cachedSSIDs));
+
+  String json = _loadData();
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) return;
+
+  JsonArray arr = doc.as<JsonArray>();
+  for (JsonObject cred : arr) {
+    if (_cachedCredsCount >= MAX_CREDS) break;
+    const char* ssid = cred["ssid"] | "";
+    if (strlen(ssid) > 0) {
+      strncpy(_cachedSSIDs[_cachedCredsCount], ssid, 32);
+      _cachedSSIDs[_cachedCredsCount][32] = '\0';
+      _cachedCredsCount++;
+    }
+  }
+}
+
 void WiFiManager::addCredential(const char* ssid, const char* password) {
   String json = _loadData();
   JsonDocument doc;
@@ -124,6 +156,7 @@ void WiFiManager::addCredential(const char* ssid, const char* password) {
     if (strcmp(obj["ssid"] | "", ssid) == 0) {
       obj["password"] = password;
       String out; serializeJson(arr, out); _saveData(out);
+      _updateCredCache();
       _log(WIFI_LOG_INFO, "[WiFiManager] Updated credential: %s", ssid);
       if (_cbCredsChanged) _cbCredsChanged();
       return;
@@ -133,7 +166,7 @@ void WiFiManager::addCredential(const char* ssid, const char* password) {
   // Enforce FIFO capacity limit
   if (arr.size() >= MAX_CREDS) {
     _log(WIFI_LOG_INFO, "[WiFiManager] Limit (%u) reached, removing oldest: %s",
-         (unsigned)MAX_CREDS, arr[0]["ssid"].as<const char*>());
+         (unsigned)MAX_CREDS, arr[0]["ssid"] | "");
     arr.remove(0);
   }
 
@@ -141,6 +174,7 @@ void WiFiManager::addCredential(const char* ssid, const char* password) {
   o["ssid"]     = ssid;
   o["password"] = password;
   String out; serializeJson(arr, out); _saveData(out);
+  _updateCredCache();
   _log(WIFI_LOG_INFO, "[WiFiManager] Added credential: %s", ssid);
   if (_cbCredsChanged) _cbCredsChanged();
 }
@@ -155,6 +189,7 @@ void WiFiManager::deleteCredential(const char* ssid) {
     if (strcmp(arr[i]["ssid"] | "", ssid) == 0) {
       arr.remove(i);
       String out; serializeJson(arr, out); _saveData(out);
+      _updateCredCache();
       _log(WIFI_LOG_INFO, "[WiFiManager] Deleted credential: %s", ssid);
       if (_cbCredsChanged) _cbCredsChanged();
       return;
@@ -167,6 +202,7 @@ void WiFiManager::clearCredentials() {
   _prefs.begin(NVS_NAMESPACE, false);
   _prefs.remove(NVS_KEY_CREDS);
   _prefs.end();
+  _updateCredCache();
   _log(WIFI_LOG_INFO, "[WiFiManager] All credentials cleared.");
   if (_cbCredsChanged) _cbCredsChanged();
 }
@@ -182,7 +218,7 @@ void WiFiManager::listCredentialsToSerial() const {
   for (JsonObject obj : doc.as<JsonArray>()) {
     // Print each SSID individually since _log uses a fixed buffer
     char buf[80];
-    snprintf(buf, sizeof(buf), "  - %s", obj["ssid"].as<const char*>());
+    snprintf(buf, sizeof(buf), "  - %s", obj["ssid"] | "");
     _log(WIFI_LOG_INFO, buf);
   }
 }
@@ -280,6 +316,7 @@ void WiFiManager::setWiFiSleep(bool enable) {
 
 void WiFiManager::begin() {
   _loadStaticIP();   // restore any persisted static IP from NVS
+  _updateCredCache();
   _setupEventHandlers();
   _printHelp();
   _log(WIFI_LOG_INFO, "[WiFiManager] v5 ready. AutoAP=%s BackgroundReconnect=%s",
@@ -291,7 +328,7 @@ void WiFiManager::begin() {
 
 void WiFiManager::_setupEventHandlers() {
 #if defined(ESP32)
-  WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
+  _wifiDisconnectEventId = WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
     if (_apModeActive) return;
     _log(WIFI_LOG_INFO, "[WiFiManager] Disconnected (event). Reason: %d",
          (int)info.wifi_sta_disconnected.reason);
@@ -357,7 +394,7 @@ void WiFiManager::_checkScanStatus() {
     JsonArray arr = doc.as<JsonArray>();
 
     if (n > 0) {
-      struct Match { String ssid, pass; int32_t rssi; };
+      struct Match { const char* ssid; const char* pass; int32_t rssi; };
       std::vector<Match> found;
 
       for (int i = 0; i < n; ++i) {
@@ -365,16 +402,23 @@ void WiFiManager::_checkScanStatus() {
         int32_t rssi    = WiFi.RSSI(i);
 
         for (JsonObject cred : arr) {
-          if (scanned == cred["ssid"].as<String>()) {
+          const char* cred_ssid = cred["ssid"] | "";
+          if (scanned == cred_ssid) {
             bool exists = false;
             for (auto& f : found) {
-              if (f.ssid == scanned) {
+              if (strcmp(f.ssid, cred_ssid) == 0) {
                 exists = true;
                 if (rssi > f.rssi) f.rssi = rssi;
                 break;
               }
             }
-            if (!exists) found.push_back({scanned, cred["password"].as<String>(), rssi});
+            if (!exists) {
+              Match m;
+              m.ssid = cred_ssid;
+              m.pass = cred["password"] | "";
+              m.rssi = rssi;
+              found.push_back(m);
+            }
             break;
           }
         }
@@ -387,13 +431,13 @@ void WiFiManager::_checkScanStatus() {
         _matchedSSIDs.push_back(f.ssid);
         _matchedPasses.push_back(f.pass);
         _log(WIFI_LOG_INFO, "[WiFiManager] Matched: %s (RSSI: %d dBm)",
-             f.ssid.c_str(), f.rssi);
+             f.ssid, f.rssi);
       }
     } else {
       // No visible networks — try all saved credentials as fallback
       for (JsonObject cred : arr) {
-        _matchedSSIDs.push_back(cred["ssid"].as<String>());
-        _matchedPasses.push_back(cred["password"].as<String>());
+        _matchedSSIDs.push_back(cred["ssid"] | "");
+        _matchedPasses.push_back(cred["password"] | "");
       }
     }
   }
@@ -517,6 +561,7 @@ void WiFiManager::_startBGScan() {
   WiFi.mode(WIFI_AP_STA);
   WiFi.scanNetworks(/*async=*/true, /*showHidden=*/true);
   _bgScanPending = true;
+  _lastScanJson  = ""; // empty means scanning
 }
 
 void WiFiManager::_checkBGScan() {
@@ -538,21 +583,52 @@ void WiFiManager::_checkBGScan() {
 
   if (n <= 0) {
     _log(WIFI_LOG_DEBUG, "[WiFiManager] Background scan: no networks found.");
+    _lastScanJson = "[]";
     return;
   }
 
   _log(WIFI_LOG_DEBUG, "[WiFiManager] Background scan complete: %d network(s).", n);
 
-  // Check if any saved credentials match
-  String json = _loadData();
-  JsonDocument doc;
-  if (deserializeJson(doc, json)) { WiFi.scanDelete(); return; }
+  // Cache the top 10 strongest results for the web UI to avoid OOM
+  struct ScanResult {
+    String ssid;
+    int32_t rssi;
+    bool encryption;
+  };
+  std::vector<ScanResult> scanResults;
+  scanResults.reserve(n);
+  for (int i = 0; i < n; ++i) {
+    bool enc = false;
+#if defined(ESP32)
+    enc = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+#elif defined(ESP8266)
+    enc = (WiFi.encryptionType(i) != ENC_TYPE_NONE);
+#endif
+    scanResults.push_back({WiFi.SSID(i), WiFi.RSSI(i), enc});
+  }
 
-  JsonArray arr = doc.as<JsonArray>();
+  // Sort by RSSI descending
+  std::sort(scanResults.begin(), scanResults.end(),
+            [](const ScanResult& a, const ScanResult& b){ return a.rssi > b.rssi; });
+
+  // Limit to top 10
+  size_t limit = min(scanResults.size(), (size_t)10);
+
+  JsonDocument docScan;
+  for (size_t i = 0; i < limit; ++i) {
+    JsonObject obj    = docScan.add<JsonObject>();
+    obj["ssid"]       = scanResults[i].ssid;
+    obj["rssi"]       = scanResults[i].rssi;
+    obj["encryption"] = scanResults[i].encryption;
+  }
+  _lastScanJson = "";
+  serializeJson(docScan, _lastScanJson);
+
+  // Check if any saved credentials match using RAM cache
   for (int i = 0; i < n; ++i) {
     String scanned = WiFi.SSID(i);
-    for (JsonObject cred : arr) {
-      if (scanned == cred["ssid"].as<String>()) {
+    for (uint8_t j = 0; j < _cachedCredsCount; ++j) {
+      if (scanned == _cachedSSIDs[j]) {
         _log(WIFI_LOG_INFO, "[WiFiManager] Known network '%s' detected. Auto-recovering!",
              scanned.c_str());
         WiFi.scanDelete();
@@ -634,21 +710,24 @@ void WiFiManager::startAPMode(ESP_WebServer& server) {
 
   _setState(WIFI_STATE_AP_MODE);
 
+  if (!_routesRegistered) {
 #ifdef WIFIMANAGER_USE_ASYNC_WEBSERVER
-  _server->on("/",       HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleRoot(r);   });
-  _server->on("/scan",   HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleScan(r);   });
-  _server->on("/list",   HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleList(r);   });
-  _server->on("/delete", HTTP_ANY,  [this](AsyncWebServerRequest* r){ _handleDelete(r); });
-  _server->on("/save",   HTTP_POST, [this](AsyncWebServerRequest* r){ _handleSave(r);   });
-  _server->onNotFound(              [this](AsyncWebServerRequest* r){ _handleRoot(r);   });
+    _server->on("/",       HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleRoot(r);   });
+    _server->on("/scan",   HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleScan(r);   });
+    _server->on("/list",   HTTP_GET,  [this](AsyncWebServerRequest* r){ _handleList(r);   });
+    _server->on("/delete", HTTP_ANY,  [this](AsyncWebServerRequest* r){ _handleDelete(r); });
+    _server->on("/save",   HTTP_POST, [this](AsyncWebServerRequest* r){ _handleSave(r);   });
+    _server->onNotFound(              [this](AsyncWebServerRequest* r){ _handleRoot(r);   });
 #else
-  _server->on("/",       std::bind(&WiFiManager::_handleRoot,   this));
-  _server->on("/scan",   std::bind(&WiFiManager::_handleScan,   this));
-  _server->on("/list",   std::bind(&WiFiManager::_handleList,   this));
-  _server->on("/delete", std::bind(&WiFiManager::_handleDelete, this));
-  _server->on("/save",   HTTP_POST, std::bind(&WiFiManager::_handleSave, this));
-  _server->onNotFound([this](){ _handleRoot(); });
+    _server->on("/",       std::bind(&WiFiManager::_handleRoot,   this));
+    _server->on("/scan",   std::bind(&WiFiManager::_handleScan,   this));
+    _server->on("/list",   std::bind(&WiFiManager::_handleList,   this));
+    _server->on("/delete", std::bind(&WiFiManager::_handleDelete, this));
+    _server->on("/save",   HTTP_POST, std::bind(&WiFiManager::_handleSave, this));
+    _server->onNotFound([this](){ _handleRoot(); });
 #endif
+    _routesRegistered = true;
+  }
 
   _server->begin();
   if (_cbAPStarted) _cbAPStarted(String(_ap_ssid), apIP);
@@ -701,22 +780,18 @@ void WiFiManager::_handleRoot(AsyncWebServerRequest* req) {
 }
 
 void WiFiManager::_handleScan(AsyncWebServerRequest* req) {
-  int n = WiFi.scanNetworks(/*async=*/false, /*showHidden=*/true);
-  if (n <= 0) { WiFi.scanDelete(); req->send(200, "application/json", "[]"); return; }
-  JsonDocument doc;
-  for (int i = 0; i < n; ++i) {
-    JsonObject obj    = doc.add<JsonObject>();
-    obj["ssid"]       = WiFi.SSID(i);
-    obj["rssi"]       = WiFi.RSSI(i);
-#if defined(ESP32)
-    obj["encryption"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-#elif defined(ESP8266)
-    obj["encryption"] = (WiFi.encryptionType(i) != ENC_TYPE_NONE);
-#endif
+  if (req->hasParam("force")) {
+    if (!_bgScanPending) _startBGScan();
+    AsyncWebServerResponse *resp = req->beginResponse(200, "application/json", "{\"status\":\"scanning\"}");
+    resp->addHeader("Cache-Control", "no-store");
+    req->send(resp);
+    return;
   }
-  String json; serializeJson(doc, json);
-  WiFi.scanDelete();
-  req->send(200, "application/json", json);
+
+  AsyncWebServerResponse *resp = req->beginResponse(200, "application/json", 
+    _lastScanJson.isEmpty() ? String("{\"status\":\"scanning\"}") : _lastScanJson);
+  resp->addHeader("Cache-Control", "no-store");
+  req->send(resp);
 }
 
 void WiFiManager::_handleSave(AsyncWebServerRequest* req) {
@@ -737,13 +812,16 @@ void WiFiManager::_handleList(AsyncWebServerRequest* req) {
   String json = _loadData();
   JsonDocument doc, out;
   JsonArray arrOut = out.to<JsonArray>();
-  if (!deserializeJson(doc, json))
+  if (!deserializeJson(doc, json)) {
     for (JsonObject obj : doc.as<JsonArray>()) {
       JsonObject o = arrOut.add<JsonObject>();
       o["ssid"] = obj["ssid"];
     }
+  }
   String body; serializeJson(arrOut, body);
-  req->send(200, "application/json", body);
+  AsyncWebServerResponse *resp = req->beginResponse(200, "application/json", body);
+  resp->addHeader("Cache-Control", "no-store");
+  req->send(resp);
 }
 
 void WiFiManager::_handleDelete(AsyncWebServerRequest* req) {
@@ -766,22 +844,16 @@ void WiFiManager::_handleRoot() {
 }
 
 void WiFiManager::_handleScan() {
-  int n = WiFi.scanNetworks(/*async=*/false, /*showHidden=*/true);
-  if (n <= 0) { WiFi.scanDelete(); _server->send(200, "application/json", "[]"); return; }
-  JsonDocument doc;
-  for (int i = 0; i < n; ++i) {
-    JsonObject obj    = doc.add<JsonObject>();
-    obj["ssid"]       = WiFi.SSID(i);
-    obj["rssi"]       = WiFi.RSSI(i);
-#if defined(ESP32)
-    obj["encryption"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-#elif defined(ESP8266)
-    obj["encryption"] = (WiFi.encryptionType(i) != ENC_TYPE_NONE);
-#endif
+  if (_server->hasArg("force")) {
+    if (!_bgScanPending) _startBGScan();
+    _server->sendHeader("Cache-Control", "no-store");
+    _server->send(200, "application/json", "{\"status\":\"scanning\"}");
+    return;
   }
-  String json; serializeJson(doc, json);
-  WiFi.scanDelete();
-  _server->send(200, "application/json", json);
+  
+  String out = _lastScanJson.isEmpty() ? "{\"status\":\"scanning\"}" : _lastScanJson;
+  _server->sendHeader("Cache-Control", "no-store");
+  _server->send(200, "application/json", out);
 }
 
 void WiFiManager::_handleSave() {
@@ -798,12 +870,14 @@ void WiFiManager::_handleList() {
   String json = _loadData();
   JsonDocument doc, out;
   JsonArray arrOut = out.to<JsonArray>();
-  if (!deserializeJson(doc, json))
+  if (!deserializeJson(doc, json)) {
     for (JsonObject obj : doc.as<JsonArray>()) {
       JsonObject o = arrOut.add<JsonObject>();
       o["ssid"] = obj["ssid"];
     }
+  }
   String body; serializeJson(arrOut, body);
+  _server->sendHeader("Cache-Control", "no-store");
   _server->send(200, "application/json", body);
 }
 
@@ -837,13 +911,14 @@ int WiFiManager::_splitArgsQuoted(const String& line, String out[], int maxParts
   return count;
 }
 
-void WiFiManager::executeCommand(String cmdLine, Stream& io) {
-  cmdLine.trim();
-  if (!cmdLine.length()) return;
+void WiFiManager::executeCommand(const String& cmdLine, Stream& io) {
+  String localCmd = cmdLine;
+  localCmd.trim();
+  if (!localCmd.length()) return;
 
   const int MAXP = 4;
   String    p[MAXP];
-  int n = _splitArgsQuoted(cmdLine, p, MAXP);
+  int n = _splitArgsQuoted(localCmd, p, MAXP);
   if (n == 0) return;
 
   String cmd = p[0]; cmd.toUpperCase();

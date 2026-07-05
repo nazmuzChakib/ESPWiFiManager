@@ -130,7 +130,8 @@ def _obfuscate_js_inside_html(source: str) -> str:
         'classList', 'className', 'innerHTML', 'textContent', 'remove',
         'style', 'value', 'length', 'forEach', 'push', 'then', 'catch',
         'ok', 'json', 'status', 'name', 'ssid', 'rssi', 'encryption',
-        'padding', 'margin', 'listStyleType',
+        'padding', 'margin', 'listStyleType', 'addEventListener', 'removeEventListener',
+        'dispatchEvent', 'preventDefault', 'stopPropagation',
         # HTML attribute names that might appear as JS strings
         'href', 'src', 'type', 'onclick', 'method', 'action',
     })
@@ -337,7 +338,7 @@ def html_to_header(filepath: str, do_minify: bool = True, do_obfuscate: bool = T
         out.write(" *\n")
         out.write(f" * @see    page_{safe_base}_len  for the exact byte count.\n")
         out.write(" */\n")
-        out.write(f"const unsigned char page_{safe_base}[] = {{\n")
+        out.write(f"const unsigned char page_{safe_base}[] PROGMEM = {{\n")
 
         # Write array body (xxd -i style, 16 bytes/line, uppercase hex)
         for i, b in enumerate(compressed):

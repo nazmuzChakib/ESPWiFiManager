@@ -136,7 +136,7 @@ public:
    *                    for WPA2; use "" for an open AP).
    */
   WiFiManager(const char* ap_ssid, const char* ap_password);
-  ~WiFiManager() = default;
+  ~WiFiManager();
 
   // ── Initialisation ──────────────────────────────────────────────────────
   /**
@@ -358,7 +358,7 @@ public:
    * @param cmdLine  Full command string (trimming handled internally).
    * @param io       Stream to write responses to (default: Serial).
    */
-  void executeCommand(String cmdLine, Stream& io = Serial);
+  void executeCommand(const String& cmdLine, Stream& io = Serial);
 
 private:
   // ── Build-time constants (from config, overridable per instance) ─────────
@@ -391,6 +391,7 @@ private:
   unsigned long _startAttemptTime   = 0;
   unsigned long _scanStartTime      = 0;
   int           _lastDisconnectReason = 0;
+  String        _lastScanJson       = "[]";
 
   // ── Smart-connect bookkeeping ────────────────────────────────────────────
   std::vector<String> _matchedSSIDs;
@@ -419,12 +420,18 @@ private:
   // ── Server / DNS ─────────────────────────────────────────────────────────
   ESP_WebServer* _server = nullptr;
   DNSServer      _dnsServer;
+  bool           _routesRegistered = false;
 
   // ── Static IP ────────────────────────────────────────────────────────────
   StaticIPConfig _staticIP;
 
   // ── Persistent storage ───────────────────────────────────────────────────
   mutable Preferences _prefs;
+
+  // ── Credential Cache (RAM efficiency) ────────────────────────────────────
+  char           _cachedSSIDs[MAX_CREDS][32 + 1];
+  uint8_t        _cachedCredsCount = 0;
+  void           _updateCredCache();
 
   // ── Logging ──────────────────────────────────────────────────────────────
   WiFiLogLevel  _logLevel  = static_cast<WiFiLogLevel>(WIFIMANAGER_DEFAULT_LOG_LEVEL);
@@ -439,7 +446,9 @@ private:
   std::function<void()>                       _cbAPStopped;
   std::function<void()>                       _cbCredsChanged;
 
-#if defined(ESP8266)
+#if defined(ESP32)
+  WiFiEventId_t    _wifiDisconnectEventId;
+#elif defined(ESP8266)
   WiFiEventHandler _disconnectHandler;
 #endif
 

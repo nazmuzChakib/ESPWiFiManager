@@ -27,7 +27,7 @@
 
 // ── Web server backend ────────────────────────────────────────────────────
 // Uncomment to use ESPAsyncWebServer instead of the standard WebServer:
-// #define WIFIMANAGER_USE_ASYNC_WEBSERVER
+#define WIFIMANAGER_USE_ASYNC_WEBSERVER
 
 // ── Logging ───────────────────────────────────────────────────────────────
 // Default log level. Override at runtime with wm.setLogLevel(...).
