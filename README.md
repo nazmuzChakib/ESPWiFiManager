@@ -1,7 +1,7 @@
 # ESPWiFiManager 🚀
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://github.com/nazmuzchakib/ESPWiFiManager)
+[![Version](https://img.shields.io/badge/version-5.0.1-blue.svg)](https://github.com/nazmuzchakib/ESPWiFiManager)
 [![Platform](https://img.shields.io/badge/platform-ESP32%20%7C%20ESP8266-green.svg)](https://github.com/nazmuzchakib/ESPWiFiManager)
 
 **ESPWiFiManager** is a modern, fully-featured, non-blocking Wi-Fi configuration library for **ESP32** and **ESP8266**.  
